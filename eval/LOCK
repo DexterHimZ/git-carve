@@ -1,0 +1,18 @@
+# EVAL.md pre-registration lock (DECISIONS.md D3).
+# Any later edit to docs/EVAL.md changes its SHA-256; after this lock only crash fixes are
+# allowed, each logged in EVAL.md §8. The judge arm (M6) may not run on the test split until a
+# trained judge is frozen here too (weights, revision or file hash, training-repo list).
+locked_at: 2026-09-24
+eval_md_sha256: eb85109d0edf417e6f143d5b515f1180ee5666798e818b57f92fe814b52eaa73
+corpus_manifest_sha256: f294c4366fbbf6754cbb6cfc82d0a4df680529f11c587a65b43fb203f14eb96d
+code_arm_source_sha256: 56f76184e62ae86596752bdcf72a14808e2c53642a8dea52f82fb09494c8d6a9
+judge: frozen 2026-09-24, before step 4 (DECISIONS.md D21 ladder, rung 1 = D28 learned merge model; D31 linkage; D32 run guard)
+judge_weights_file: eval/judge/weights-v1.json
+judge_weights_sha256: 797b03955739fe4d92c2d696e4506c8b492c91b9faf38052622cbd84e39df094
+judge_config: theta=0.7 linkage=pooled platt=0.821601,0.480245
+judge_training_repos: ky zod jotai swr tanstack-query (eval/corpus/train-manifest.json; disjoint from this corpus by root commit)
+judge_training_pairs_sha256: 75da5afb91454197746f92a5d660e7e55618935b2ccb1913aa080cf88cbfeab7
+thresholds_sha256: 546ceb4a79a581e2e9c7dd2c5210487ebd9a6b70964e87a018f4a383c38dbbcb
+judge_arm_source_sha256: 2efde96c73e9aa7601e210cf0ee2823a6bdf785be4df5c7f52f143e39a7f35dc
+code_arm_rerun: at 2efde96c73e9 the code arm reproduces baseline-test.json window for window (D25)
+temporal_holdout_anchor: the sources[].head oids in the locked manifest (DECISIONS.md D34)
