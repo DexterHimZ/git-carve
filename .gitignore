@@ -1,0 +1,6 @@
+/target
+
+# Evaluation data that names private source repositories stays local.
+/eval/sources.json
+/eval/corpus/
+/eval/results/
