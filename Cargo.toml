@@ -1,0 +1,27 @@
+[package]
+name = "git-carve"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Splits your mess into commits that each pass your check. Refuses to write your commit messages."
+# Flip at M7, once the license and README are decided.
+publish = false
+
+[[bin]]
+name = "git-carve"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"                                     # errors at the CLI edge (project convention)
+clap = { version = "4", features = ["derive"] }  # CLI parsing (SPEC §11)
+imara-diff = "0.2.0"                             # histogram line diff (SPEC §5.3)
+serde = { version = "1.0.229", features = ["derive"] }  # undo.json, --json, caches
+serde_json = "1.0.151"                             # JSON encoding for the above
+thiserror = "2"                                  # typed errors inside library modules (project convention)
+tree-sitter = "0.26.13"                           # parsing (DECISIONS.md D7)
+tree-sitter-typescript = "0.23.2"                 # the v1 grammar
+
+[dev-dependencies]
+insta = "1.48.0"                                    # plan-buffer snapshots (the buffer is a UI)
+proptest = "1.11.0"                                 # R1–R4 reconstruction properties (SPEC §5.5)
+tempfile = "3"                                   # throwaway repos for integration tests
