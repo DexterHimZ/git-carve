@@ -1,0 +1,29 @@
+---
+source: tests/plan.rs
+expression: stdout(&out)
+---
+# git carve: 2 commits, 1 hunk left out. Every commit below passed: if grep -q useHelper a.txt; then grep -q defHelper b.txt; fi
+# (merged planned commits 1 and 2: they did not pass separately)
+# WARNING: the check passed on a deliberately broken src/s.ts; changes to it are unverified.
+#
+# Write a message under each "commit" line (first line = subject).
+# Move "@" lines between blocks to regroup. Reorder blocks to reorder commits.
+# Delete a "commit" line to merge its block into the block above.
+# "@" lines under "leave" stay in your working tree, uncommitted.
+# Lines starting with '#' are ignored. Any commit with an empty message aborts everything.
+# If you change grouping or order, the check re-runs before anything is committed.
+
+commit
+
+
+  @ a1   a.txt:1                          +1 -1
+  @ a2   b.txt:1                          +1 -1
+
+commit
+# style-only (whitespace)
+
+
+  @ a3   src/s.ts:2                       +1 -1  s  [whitespace]
+
+leave
+  @ a4   src/s.ts:6                       +1 -0  t  [debug-only line]

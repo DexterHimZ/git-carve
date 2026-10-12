@@ -1,0 +1,137 @@
+---
+source: tests/plan.rs
+expression: stdout(&out)
+---
+# git carve: 3 commits, 2 hunks left out. These commits are NOT verified (--no-check).
+#
+# Write a message under each "commit" line (first line = subject).
+# Move "@" lines between blocks to regroup. Reorder blocks to reorder commits.
+# Delete a "commit" line to merge its block into the block above.
+# "@" lines under "leave" stay in your working tree, uncommitted.
+# Lines starting with '#' are ignored. Any commit with an empty message aborts everything.
+# If you change grouping or order, the check re-runs before anything is committed.
+
+commit
+
+
+  @ a1   src/format.ts:1                  +1 -1  formatBytes  [new]
+  @ a2   src/main.ts:2                    +1 -1
+  @ a4   src/main.ts:10                   +1 -1  main
+  @ a9   src/progress.ts:1                +1 -1
+  @ a10  src/progress.ts:4                +1 -1  progressText
+  @ a11  src/report.ts:1                  +1 -1
+  @ a12  src/report.ts:4                  +1 -1  describeUpload
+  @ a13  src/summary.ts:1                 +1 -1
+  @ a14  src/summary.ts:4                 +1 -1  summaryLine
+  @ a15  src/table.ts:1                   +1 -1
+  @ a16  src/table.ts:4                   +1 -1  sizeCell
+
+commit
+
+
+  @ a5   src/net.ts:11                    +1 -1  fetchAll
+  @ a7   src/net.ts:16-28                 +13 -0  retryWithBackoff  [new]
+  @ a17  tests/net.test.ts:1              +1 -1
+  @ a18  tests/net.test.ts:7-16           +10 -0  testRetryWithBackoff  [new]
+
+commit
+
+
+  @ a8   src/parse.ts:8                   +1 -1  parseHeader
+
+leave
+  @ a3   src/main.ts:6                    +1 -0  main  [debug-only line]
+  @ a6   src/net.ts:13                    +1 -0  fetchAll  [debug-only line]
+
+# ------------------------ >8 ------------------------
+# Do not modify or remove the line above.
+# Everything below it is ignored: each hunk's diff, for reference.
+
+@@ a1  src/format.ts:1
+-export function fmtBytes(n: number): string {
++export function formatBytes(n: number): string {
+
+@@ a2  src/main.ts:2
+-import { fmtBytes } from "./format";
++import { formatBytes } from "./format";
+
+@@ a4  src/main.ts:10
+-  return fmtBytes(total);
++  return formatBytes(total);
+
+@@ a9  src/progress.ts:1
+-import { fmtBytes } from "./format";
++import { formatBytes } from "./format";
+
+@@ a10  src/progress.ts:4
+-  return `${fmtBytes(done)} of ${fmtBytes(all)}`;
++  return `${formatBytes(done)} of ${formatBytes(all)}`;
+
+@@ a11  src/report.ts:1
+-import { fmtBytes } from "./format";
++import { formatBytes } from "./format";
+
+@@ a12  src/report.ts:4
+-  return `${label}: ${fmtBytes(size)}`;
++  return `${label}: ${formatBytes(size)}`;
+
+@@ a13  src/summary.ts:1
+-import { fmtBytes } from "./format";
++import { formatBytes } from "./format";
+
+@@ a14  src/summary.ts:4
+-  return `${count} files, ${fmtBytes(size)}`;
++  return `${count} files, ${formatBytes(size)}`;
+
+@@ a15  src/table.ts:1
+-import { fmtBytes } from "./format";
++import { formatBytes } from "./format";
+
+@@ a16  src/table.ts:4
+-  return fmtBytes(size).padStart(10);
++  return formatBytes(size).padStart(10);
+
+@@ a5  src/net.ts:11
+-    results.push(await fetcher(url));
++    results.push(await retryWithBackoff(() => fetcher(url)));
+
+@@ a7  src/net.ts:16-28
++
++export async function retryWithBackoff<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
++  let delay = 100;
++  for (let attempt = 1; ; attempt++) {
++    try {
++      return await fn();
++    } catch (failure) {
++      if (attempt >= attempts) throw failure;
++      await new Promise((wake) => setTimeout(wake, delay));
++      delay *= 2;
++    }
++  }
++}
+
+@@ a17  tests/net.test.ts:1
+-import { fetchAll } from "../src/net";
++import { fetchAll, retryWithBackoff } from "../src/net";
+
+@@ a18  tests/net.test.ts:7-16
++
++export async function testRetryWithBackoff(): Promise<boolean> {
++  let calls = 0;
++  const outcome = await retryWithBackoff(async () => {
++    calls += 1;
++    if (calls < 2) throw new Error("flaky");
++    return "ok";
++  });
++  return outcome === "ok" && calls === 2;
++}
+
+@@ a8  src/parse.ts:8
+-  const name = line.slice(0, colon - 1);
++  const name = line.slice(0, colon);
+
+@@ a3  src/main.ts:6
++  console.log(cfg);
+
+@@ a6  src/net.ts:13
++  console.log("fetched", results.length);
