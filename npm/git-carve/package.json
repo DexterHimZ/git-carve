@@ -1,0 +1,23 @@
+{
+  "name": "git-carve",
+  "version": "0.0.0",
+  "description": "Splits a dirty working tree into commits that each pass your check. Never writes your commit messages.",
+  "license": "UNLICENSED",
+  "bin": {
+    "git-carve": "bin/git-carve.js"
+  },
+  "files": [
+    "bin/git-carve.js",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@git-carve/linux-x64": "0.0.0",
+    "@git-carve/linux-arm64": "0.0.0",
+    "@git-carve/darwin-x64": "0.0.0",
+    "@git-carve/darwin-arm64": "0.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["git", "commit", "split", "typescript", "tsc"]
+}
