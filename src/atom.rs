@@ -385,8 +385,8 @@ fn structural_binds(repo: &Repo, snap: &Snapshot, changes: &Changes) -> Result<V
             let from = fields.next();
             let to = if pair { fields.next() } else { None };
             if let (true, Some(from), Some(to)) = (status.first() == Some(&b'R'), from, to) {
-                let atoms = (by_path.get(from).copied().and_then(&whole_atom))
-                    .zip(by_path.get(to).copied().and_then(&whole_atom));
+                let atoms = (by_path.get(from).copied().and_then(whole_atom))
+                    .zip(by_path.get(to).copied().and_then(whole_atom));
                 if let Some((a, b)) = atoms {
                     binds.push(Bind {
                         a,

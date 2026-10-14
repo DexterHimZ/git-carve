@@ -136,7 +136,7 @@ fn deleting_a_commit_line_merges_into_the_block_above() {
     let merged = format!(
         "{}{}",
         &text[..second],
-        &text[second..].replacen("\ncommit\nMessage 2", "\n", 1)
+        text[second..].replacen("\ncommit\nMessage 2", "\n", 1)
     );
     let Parsed::Plan(edited) = plan::parse(&merged, &changes, &plan.hard) else {
         panic!()
