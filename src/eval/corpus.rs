@@ -11,7 +11,6 @@ use tree_sitter::{Node, Parser};
 use super::sha256::{Rng, digest_mod, hex, sha256};
 use crate::error::{Error, Result, io};
 use crate::git::Git;
-use crate::lang::adapter_for;
 use crate::text;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -520,7 +519,9 @@ fn plan_injections(
     // Only files that exist in the base: an injection into a new file would merge into its
     // whole-file atom and make that atom's ground truth mixed.
     for path in w.files.iter().filter(|f| {
-        adapter_for(f.as_bytes()).is_some() && w.provenance.contains_key(*f) && in_base.contains(*f)
+        crate::lang::is_typescript(f.as_bytes())
+            && w.provenance.contains_key(*f)
+            && in_base.contains(*f)
     }) {
         let Ok(last) = git.run(["cat-file", "blob", &format!("{}:{path}", w.last())]) else {
             continue;

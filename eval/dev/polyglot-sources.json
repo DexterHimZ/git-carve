@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "seed": 20261007,
+  "notes": "D45 development corpus: non-TypeScript open-source history (Python, Go, Rust), used to measure the generic adapter. Never part of the locked EVAL corpus.",
+  "window": { "max_files": 15, "max_windows_per_source": 120 },
+  "sources": [
+    { "name": "click", "location": "https://github.com/pallets/click", "role": "train" },
+    { "name": "httpx", "location": "https://github.com/encode/httpx", "role": "train" },
+    { "name": "cobra", "location": "https://github.com/spf13/cobra", "role": "train" },
+    { "name": "bubbletea", "location": "https://github.com/charmbracelet/bubbletea", "role": "train" },
+    { "name": "fd", "location": "https://github.com/sharkdp/fd", "role": "train" }
+  ]
+}

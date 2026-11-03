@@ -149,6 +149,8 @@ struct Context<'a> {
     /// Top-level definition names per changed file, either version.
     top_names: Vec<BTreeSet<String>>,
     stoplist: BTreeSet<&'static str>,
+    /// Every adapter's stop words, for name-only resolution (D45).
+    any_stoplist: BTreeSet<&'static str>,
 }
 
 impl<'a> Context<'a> {
@@ -213,6 +215,7 @@ impl<'a> Context<'a> {
             imports,
             top_names,
             stoplist,
+            any_stoplist: crate::lang::stoplist(),
         }
     }
 
@@ -247,7 +250,19 @@ impl<'a> Context<'a> {
         let facts = self.facts(file, version)?;
         let is_final = version == Version::Final;
         let import_target = |k: usize| self.imports.get(&(file, is_final, k)).copied().flatten();
+        let name_only =
+            adapter_for(&self.changes.files[file].path).is_some_and(|a| a.name_only_resolution());
         if let Some(q) = qualifier {
+            // D45: `module.name` resolves by name only when `module` is an imported module, never
+            // for `self.x` or `obj.method`.
+            if name_only {
+                return facts
+                    .imports
+                    .iter()
+                    .any(|i| i.local == q)
+                    .then(|| self.by_name(file, name))
+                    .flatten();
+            }
             // `ns.name` with `import * as ns from './x'` names x's export `name`.
             let (k, _) = facts
                 .imports
@@ -271,6 +286,11 @@ impl<'a> Context<'a> {
                 _ => Some(key),
             };
         }
+        if name_only {
+            // D45: no module resolution; an imported or unqualified name resolves to the one
+            // changed file of the same language that defines it at top level.
+            return self.by_name(file, name);
+        }
         let (k, import) = facts
             .imports
             .iter()
@@ -285,6 +305,24 @@ impl<'a> Context<'a> {
             Imported::Namespace => return None,
         };
         Some(Key::Top(target, exported))
+    }
+
+    /// D45: the single other changed file, in the same language, that defines `name` at top
+    /// level. Common names and ambiguous ones resolve to nothing.
+    fn by_name(&self, file: usize, name: &str) -> Option<Key> {
+        if name.len() < 3 || self.any_stoplist.contains(name) {
+            return None;
+        }
+        let ext = crate::lang::extension(&self.changes.files[file].path);
+        let mut found = (0..self.changes.files.len()).filter(|&j| {
+            j != file
+                && crate::lang::extension(&self.changes.files[j].path) == ext
+                && self.top_names[j].contains(name)
+        });
+        match (found.next(), found.next()) {
+            (Some(target), None) => Some(Key::Top(target, name.to_owned())),
+            _ => None,
+        }
     }
 
     fn atom_facts(&self, file: usize, kind: &AtomKind) -> AtomFacts {

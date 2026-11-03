@@ -496,15 +496,21 @@ fn probe(
     // One changed, committed, parseable file per nearest-config directory.
     let grouped: BTreeSet<AtomId> = plan.groups.iter().flatten().copied().collect();
     let mut per_dir: BTreeMap<Vec<u8>, (usize, usize)> = BTreeMap::new();
+    let mut outside: Vec<String> = Vec::new();
     for (f, file) in changes.files.iter().enumerate() {
         let atoms = changes.file_atoms[f]
             .iter()
             .filter(|&&i| grouped.contains(&changes.atoms[i].id))
             .count();
-        let usable = atoms > 0
+        let source = atoms > 0
             && adapter_for(&file.path).is_some()
             && file.new.as_ref().is_some_and(|e| e.mode.is_regular());
-        if !usable {
+        if !source {
+            continue;
+        }
+        // D45: a source file the check does not claim to read is unverified, not probed.
+        if !checker.spec.probes(&file.path) {
+            outside.push(show(&file.path));
             continue;
         }
         let mut dir = file.path.rsplit_once_dir();
@@ -582,6 +588,7 @@ fn probe(
         .iter()
         .filter(|p| !p.caught)
         .map(|p| p.path.clone())
+        .chain(outside)
         .collect();
     Ok(())
 }

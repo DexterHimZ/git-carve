@@ -242,6 +242,7 @@ impl LanguageAdapter for TypeScript {
             command,
             display,
             links,
+            reads: ["ts", "tsx", "mts", "cts"].map(str::to_owned).to_vec(),
         })
     }
 }

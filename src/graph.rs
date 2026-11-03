@@ -10,7 +10,6 @@ use crate::atom::{AtomId, AtomKind, BindReason, Changes};
 use crate::facts::{Analysis, Class};
 use crate::group::UnionFind;
 use crate::judge::{LearnedJudge, Merge};
-use crate::lang::primary;
 
 /// F2: an identifier linking at most this many atoms is rare enough to mean something.
 const RARE_MAX_ATOMS: usize = 3;
@@ -652,7 +651,7 @@ pub fn edges(changes: &Changes, analysis: &Analysis) -> Edges {
     // B2: a lockfile travels with every changed manifest in its directory tree.
     for (lock_file, lock) in changes.files.iter().enumerate() {
         let (dir, name) = split_path(&lock.path);
-        for &(manifest, lockfile) in primary().manifest_lock_pairs() {
+        for (manifest, lockfile) in crate::lang::manifest_lock_pairs() {
             if name != lockfile.as_bytes() {
                 continue;
             }
@@ -751,7 +750,9 @@ pub fn edges(changes: &Changes, analysis: &Analysis) -> Edges {
         }
     }
     // F2: a shared rare identifier.
-    let stoplist: BTreeSet<&str> = primary().stoplist().iter().copied().collect();
+    // F2 keeps the TypeScript stop words it was measured with (D26); the generic adapter's
+    // name-only resolution has its own (D45).
+    let stoplist: BTreeSet<&str> = crate::lang::primary().stoplist().iter().copied().collect();
     let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, f) in facts.iter().enumerate().filter(|(i, _)| joins(*i)) {
         for name in &f.names {

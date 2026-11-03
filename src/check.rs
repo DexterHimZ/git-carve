@@ -41,6 +41,20 @@ pub struct CheckSpec {
     pub explicit: bool,
     /// Extra directories to link into the scratch worktree (a sub-project's `node_modules`).
     pub links: Vec<String>,
+    /// The file extensions a default check reads (D45); `None` for an explicit check, whose
+    /// reach only the probe can tell.
+    pub reads: Option<Vec<String>>,
+}
+
+impl CheckSpec {
+    /// Whether the probe should test `path`: an adapter-known file this check claims to read.
+    pub fn probes(&self, path: &[u8]) -> bool {
+        crate::lang::adapter_for(path).is_some()
+            && self
+                .reads
+                .as_ref()
+                .is_none_or(|exts| exts.contains(&crate::lang::extension(path)))
+    }
 }
 
 /// `--check`, then `git config carve.check`, then the adapter's default (§8.1).
@@ -63,14 +77,44 @@ pub fn resolve(repo: &Repo, flag: Option<&str>, changed: &[&[u8]]) -> Result<Che
         .iter()
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .collect();
-    let check = primary()
-        .default_check(&repo.toplevel, &configs, &changed)
-        .map_err(|reason| precondition(reason, None))?;
+    let check = match primary().default_check(&repo.toplevel, &configs, &changed) {
+        Ok(check) => check,
+        // No TypeScript project at all: the ecosystem's own check (DECISIONS.md D45).
+        Err(_) if configs.is_empty() => {
+            match crate::lang::generic::ecosystem_check(&repo.toplevel, &changed) {
+                Some(check) => check,
+                None if changed
+                    .iter()
+                    .any(|p| crate::lang::is_typescript(p.as_bytes())) =>
+                {
+                    return Err(precondition(
+                        "no tsconfig.json at the repository root, so there is no default check \
+                         (no tsconfig files are tracked)",
+                        Some(
+                            "pass --check, or set it once: git config carve.check \"npx tsc --noEmit -p .\"",
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(precondition(
+                        "carve has no default check for this repository (it found no tsconfig.json, \
+                         Cargo.toml, go.mod, or Python project file at the top level)",
+                        Some(
+                            "pass the command that checks your code, such as --check \"make test\", \
+                              or set it once: git config carve.check \"make test\"",
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(reason) => return Err(precondition(reason, None)),
+    };
     Ok(CheckSpec {
         command: check.command,
         display: check.display,
         explicit: false,
         links: check.links,
+        reads: Some(check.reads),
     })
 }
 
@@ -80,6 +124,7 @@ fn explicit(command: &str) -> CheckSpec {
         display: command.to_owned(),
         explicit: true,
         links: Vec::new(),
+        reads: None,
     }
 }
 

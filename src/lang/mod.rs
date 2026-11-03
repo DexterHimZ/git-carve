@@ -1,5 +1,6 @@
 //! Language adapters (SPEC §6.1). v1 has exactly one: TypeScript.
 
+pub mod generic;
 pub mod resolve;
 pub mod typescript;
 
@@ -113,6 +114,11 @@ pub trait LanguageAdapter {
         configs: &[String],
         changed: &[String],
     ) -> Result<DefaultCheck, String>;
+    /// Whether a reference may resolve by name alone to the one changed file that defines it
+    /// at top level (DECISIONS.md D45). Adapters with real module resolution say no.
+    fn name_only_resolution(&self) -> bool {
+        false
+    }
 }
 
 /// A check command built by an adapter.
@@ -124,12 +130,57 @@ pub struct DefaultCheck {
     /// Extra untracked directories the check needs in the scratch worktree, such as a
     /// sub-project's `node_modules`.
     pub links: Vec<String>,
+    /// File extensions the check reads (DECISIONS.md D45). The probe (D1) targets only these;
+    /// other changed source files are reported as unverified.
+    pub reads: Vec<String>,
 }
 
 /// The adapter for `path`, if any.
 pub fn adapter_for(path: &[u8]) -> Option<&'static dyn LanguageAdapter> {
     static TS: typescript::TypeScript = typescript::TypeScript;
-    TS.matches(path).then_some(&TS as &dyn LanguageAdapter)
+    static GENERIC: generic::Generic = generic::Generic;
+    // Dev-only ablation knob for the eval harness (D45): `GIT_CARVE_DEV_NO_GENERIC=1`.
+    static NO_GENERIC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let generic_off =
+        *NO_GENERIC.get_or_init(|| std::env::var_os("GIT_CARVE_DEV_NO_GENERIC").is_some());
+    if TS.matches(path) {
+        Some(&TS)
+    } else if !generic_off && GENERIC.matches(path) {
+        Some(&GENERIC)
+    } else {
+        None
+    }
+}
+
+/// Whether `path` is TypeScript (the one tree-sitter adapter).
+pub fn is_typescript(path: &[u8]) -> bool {
+    typescript::TypeScript.matches(path)
+}
+
+/// Manifest/lockfile pairs of every ecosystem carve knows (SPEC §6.3 B2).
+pub fn manifest_lock_pairs() -> Vec<(&'static str, &'static str)> {
+    let ts: &'static [(&'static str, &'static str)] = primary().manifest_lock_pairs();
+    ts.iter().chain(generic::LOCKS).copied().collect()
+}
+
+/// Names too common to link anything on their own, across adapters.
+pub fn stoplist() -> BTreeSet<&'static str> {
+    static GENERIC: generic::Generic = generic::Generic;
+    primary()
+        .stoplist()
+        .iter()
+        .chain(GENERIC.stoplist())
+        .copied()
+        .collect()
+}
+
+/// The extension of a repository path (after the last dot of the file name).
+pub fn extension(path: &[u8]) -> String {
+    let name = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    match name.iter().rposition(|&b| b == b'.') {
+        Some(i) if i > 0 => String::from_utf8_lossy(&name[i + 1..]).into_owned(),
+        _ => String::new(),
+    }
 }
 
 /// The v1 adapter, for repository-wide rules such as manifest/lockfile pairs.
