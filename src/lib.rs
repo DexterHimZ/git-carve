@@ -2,6 +2,7 @@
 //! It never writes commit messages. See `docs/SPEC.md`.
 
 pub mod atom;
+pub mod branch;
 pub mod check;
 pub mod cli;
 pub mod commit;

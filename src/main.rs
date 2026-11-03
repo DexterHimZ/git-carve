@@ -41,6 +41,9 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
     }
     let repo = Repo::discover(Git::new(std::env::current_dir()?))?;
     let _lock = repo.lock()?;
+    if let Some(Command::Verify(args)) = &cli.command {
+        return run_verify(&repo, args);
+    }
 
     if cli.run.undo {
         let record = undo::undo(&repo)?;
@@ -190,6 +193,93 @@ fn print_summary(s: &Summary) {
         }
     }
     println!("Undo: git carve --undo");
+}
+
+fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<Exit> {
+    use git_carve::branch::{self, VerifyOptions};
+    use std::io::Read;
+
+    let ranges = if args.pre_push {
+        let mut stdin = String::new();
+        std::io::stdin().read_to_string(&mut stdin)?;
+        branch::pre_push_ranges(&stdin, &repo.format.null_oid())
+    } else if args.range.is_empty() {
+        branch::default_ranges(repo)?
+    } else {
+        vec![args.range.clone()]
+    };
+    let report = branch::verify_branch(
+        repo,
+        &VerifyOptions {
+            ranges,
+            check: args.check.clone(),
+            no_new_errors: args.no_new_errors,
+        },
+    )?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        let n = report.commits.len();
+        if n == 0 {
+            println!("git carve verify: no commits to check.");
+            return Ok(Exit::Success);
+        }
+        let base = report.baseline_errors.map_or(String::new(), |e| {
+            format!(", no new errors beyond the base's {e}")
+        });
+        println!(
+            "git carve verify: {n} commit{}, check: {}{base}",
+            if n == 1 { "" } else { "s" },
+            report.check
+        );
+        for c in &report.commits {
+            let time = if c.cached {
+                "cached".to_owned()
+            } else {
+                format!("{:.1}s", c.millis as f64 / 1000.0)
+            };
+            let mark = if c.passed { "ok  " } else { "FAIL" };
+            println!(
+                "  {mark}  {} {}  ({time})",
+                &c.oid[..c.oid.len().min(9)],
+                c.subject
+            );
+            match &c.inherits_from {
+                Some(origin) => println!(
+                    "        same errors as {}, which introduced them",
+                    &origin[..origin.len().min(9)]
+                ),
+                None => {
+                    for e in &c.errors {
+                        println!("        {e}");
+                    }
+                }
+            }
+        }
+        for path in &report.unverified {
+            println!("warning: the check does not read {path}; changes to it are unverified");
+        }
+        match report.failed() {
+            0 => println!("Every commit passes."),
+            f => {
+                println!(
+                    "{f} of {n} commit{} do not pass the check.",
+                    if n == 1 { "" } else { "s" }
+                );
+                if let Some(e) = report.base_fails {
+                    println!(
+                        "hint: the range's base already fails with {e} error{}; to check only for new ones: git carve verify --no-new-errors",
+                        if e == 1 { "" } else { "s" }
+                    );
+                }
+            }
+        }
+    }
+    Ok(if report.failed() > 0 {
+        Exit::CheckFailed
+    } else {
+        Exit::Success
+    })
 }
 
 fn run_eval(cmd: &EvalCommand) -> anyhow::Result<Exit> {

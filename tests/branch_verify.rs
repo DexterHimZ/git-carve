@@ -1,0 +1,320 @@
+//! `git carve verify` (DECISIONS.md D44): every commit in a range is checked, oldest first, in
+//! the scratch worktree; failures name the commit that introduced each error; the working
+//! tree, index, and refs are never touched.
+
+mod common;
+
+use std::process::Output;
+
+use common::{TestRepo, stderr};
+
+/// A compiler-like check: each OLDBAD or BROKEN line is a tsc-style error, and the check fails
+/// if there is any.
+const TSC_LIKE: &str = "out=$(grep -n -e OLDBAD -e BROKEN a.txt b.txt c.txt 2>/dev/null); \
+    test -z \"$out\" || { echo \"$out\" | sed 's/^\\([^:]*\\):\\([0-9]*\\):\\(.*\\)/\\1(\\2,1): error TS9999: \\3/'; exit 1; }";
+
+fn json(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", stderr(out)))
+}
+
+fn passed(doc: &serde_json::Value) -> Vec<bool> {
+    doc["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["passed"].as_bool().unwrap())
+        .collect()
+}
+
+/// base, then: a.txt changes (fine), b.txt breaks, c.txt changes (inherits b's error).
+fn three_commits() -> (TestRepo, Vec<String>) {
+    let repo = TestRepo::new();
+    for f in ["a.txt", "b.txt", "c.txt"] {
+        repo.write(f, "base\n");
+    }
+    repo.commit_all("base");
+    let mut oids = Vec::new();
+    for (f, text) in [
+        ("a.txt", "alpha\n"),
+        ("b.txt", "BROKEN\n"),
+        ("c.txt", "charlie\n"),
+    ] {
+        repo.write(f, text);
+        oids.push(repo.commit_all(&format!("change {f}")));
+    }
+    (repo, oids)
+}
+
+#[test]
+fn every_commit_is_checked_and_the_culprit_is_named() {
+    let (repo, oids) = three_commits();
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~3..HEAD", "--json", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "a failing commit exits 3");
+    let doc = json(&out);
+    assert_eq!(passed(&doc), vec![true, false, false]);
+    let commits = doc["commits"].as_array().unwrap();
+    assert_eq!(commits[1]["oid"], oids[1].as_str());
+    assert_eq!(commits[1]["errors"][0], "b.txt(1,1): error TS9999: BROKEN");
+    assert!(
+        commits[1].get("inherits_from").is_none(),
+        "it introduced the error"
+    );
+    assert_eq!(commits[2]["inherits_from"], oids[1].as_str());
+
+    // The human report says the same thing.
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~3..HEAD", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("2 of 3 commits do not pass the check"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("same errors as {}", &oids[1][..9])),
+        "{text}"
+    );
+}
+
+#[test]
+fn verify_never_touches_the_working_tree_index_or_refs() {
+    let (repo, _) = three_commits();
+    repo.write("a.txt", "dirty\n");
+    repo.write("new.txt", "untracked\n");
+    repo.run(&["add", "new.txt"]);
+    let (state, files) = (repo.observable(), repo.worktree_digest());
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~3..HEAD", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert_eq!(repo.observable(), state, "status, index, HEAD unchanged");
+    assert_eq!(
+        repo.worktree_digest(),
+        files,
+        "bytes, modes, mtimes unchanged"
+    );
+}
+
+#[test]
+fn a_second_run_is_served_from_the_cache() {
+    let (repo, _) = three_commits();
+    let run = || {
+        json(
+            &repo
+                .carve()
+                .args(["verify", "HEAD~3..HEAD", "--json", "--check", TSC_LIKE])
+                .output()
+                .unwrap(),
+        )
+    };
+    let first = run();
+    assert!(first["runs"].as_u64().unwrap() >= 3);
+    let second = run();
+    assert_eq!(second["runs"], 0, "every tree was checked before");
+    assert!(
+        second["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["cached"] == true)
+    );
+    assert_eq!(passed(&second), passed(&first));
+}
+
+#[test]
+fn pre_push_checks_only_what_is_being_pushed() {
+    let (repo, oids) = three_commits();
+    let zero = "0".repeat(oids[0].len());
+    // Pushing main from oids[0] (already on the remote) to HEAD: two commits.
+    let stdin = format!(
+        "refs/heads/main {} refs/heads/main {}\nrefs/heads/gone {zero} refs/heads/gone {}\n",
+        oids[2], oids[0], oids[0]
+    );
+    let mut child = repo
+        .carve()
+        .args(["verify", "--pre-push", "--json", "--check", TSC_LIKE])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let doc = json(&out);
+    let checked: Vec<&str> = doc["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["oid"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        checked,
+        vec![oids[1].as_str(), oids[2].as_str()],
+        "the deleted ref is skipped"
+    );
+    assert_eq!(out.status.code(), Some(3), "the push is blocked");
+}
+
+#[test]
+fn the_default_range_is_what_the_upstream_lacks() {
+    let (repo, oids) = three_commits();
+    // No remote at all: nothing safe to default to.
+    let out = repo
+        .carve()
+        .args(["verify", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("git carve verify main..HEAD"),
+        "{}",
+        stderr(&out)
+    );
+
+    // An upstream that has the first change: only the last two are checked.
+    let remote = tempfile::tempdir().unwrap();
+    let remote_path = remote.path().to_string_lossy().into_owned();
+    repo.run(&["init", "-q", "--bare", &remote_path]);
+    repo.run(&["remote", "add", "origin", &remote_path]);
+    repo.run(&[
+        "push",
+        "-q",
+        "origin",
+        &format!("{}:refs/heads/main", oids[0]),
+    ]);
+    repo.run(&["branch", "-q", "--set-upstream-to=origin/main"]);
+    let doc = json(
+        &repo
+            .carve()
+            .args(["verify", "--json", "--check", TSC_LIKE])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(doc["commits"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["commits"][0]["oid"], oids[1].as_str());
+}
+
+#[test]
+fn no_new_errors_measures_each_commit_against_the_base() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.write("b.txt", "base\n");
+    repo.write("c.txt", "OLDBAD\n");
+    repo.commit_all("base with an old error");
+    repo.write("a.txt", "alpha\n");
+    let fine = repo.commit_all("adds no new error");
+    repo.write("b.txt", "BROKEN\n");
+    let broken = repo.commit_all("adds a new error");
+
+    let plain = repo
+        .carve()
+        .args(["verify", "HEAD~2..HEAD", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&plain.stdout);
+    assert!(text.contains("2 of 2 commits do not pass"), "{text}");
+    assert!(
+        text.contains("already fails with 1 error"),
+        "the hint names the base: {text}"
+    );
+
+    let doc = json(
+        &repo
+            .carve()
+            .args([
+                "verify",
+                "HEAD~2..HEAD",
+                "--json",
+                "--no-new-errors",
+                "--check",
+                TSC_LIKE,
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(doc["baseline_errors"], 1);
+    assert_eq!(doc["commits"][0]["oid"], fine.as_str());
+    assert_eq!(passed(&doc), vec![true, false]);
+    assert_eq!(doc["commits"][1]["oid"], broken.as_str());
+    assert_eq!(
+        doc["commits"][1]["errors"],
+        serde_json::json!(["b.txt(1,1): error TS9999: BROKEN"]),
+        "only the new error is quoted"
+    );
+}
+
+#[test]
+fn a_check_that_reads_nothing_is_reported() {
+    let repo = TestRepo::new();
+    repo.write("src/a.ts", "export const a = 1;\n");
+    repo.commit_all("base");
+    repo.write("src/a.ts", "export const a = 2;\n");
+    repo.commit_all("change a");
+    let doc = json(
+        &repo
+            .carve()
+            .args(["verify", "HEAD~1..HEAD", "--json", "--check", "true"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(passed(&doc), vec![true]);
+    assert_eq!(
+        doc["unverified"],
+        serde_json::json!(["src/a.ts"]),
+        "the probe (D1) shows `true` never reads the file"
+    );
+}
+
+#[test]
+fn demo_commits_are_verified_with_real_tsc() {
+    let repo = TestRepo::demo();
+    if !repo.link_typescript() {
+        return;
+    }
+    // Commit the demo's mess as rename, then a feature with a typo, then the fix.
+    let rename = [
+        "src/format.ts",
+        "src/main.ts",
+        "src/report.ts",
+        "src/table.ts",
+        "src/progress.ts",
+        "src/summary.ts",
+    ];
+    repo.run(&[&["add", "--"][..], &rename[..]].concat());
+    repo.run(&["commit", "-q", "-m", "rename"]);
+    let net = std::fs::read_to_string(repo.path().join("src/net.ts")).unwrap();
+    repo.write("src/net.ts", net.replace("throw failure", "throw failur"));
+    repo.run(&["add", "src/net.ts", "tests/net.test.ts"]);
+    repo.run(&["commit", "-q", "-m", "feature with a typo"]);
+    repo.run(&["add", "src/parse.ts"]);
+    repo.run(&["commit", "-q", "-m", "fix"]);
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~3..HEAD", "--json"])
+        .output()
+        .unwrap();
+    let doc = json(&out);
+    assert_eq!(doc["check"], "tsc --noEmit -p .");
+    assert_eq!(passed(&doc), vec![true, false, false]);
+    assert!(
+        doc["commits"][1]["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("TS2552")
+    );
+    assert!(doc["commits"][2]["inherits_from"].is_string());
+}

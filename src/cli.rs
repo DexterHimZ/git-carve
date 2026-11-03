@@ -70,9 +70,35 @@ pub struct RunArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Check that every commit in a range passes the check (pre-push or CI)
+    Verify(VerifyArgs),
     /// The evaluation harness (docs/EVAL.md): build the corpus, run an arm
     #[command(hide = true, subcommand)]
     Eval(EvalCommand),
+}
+
+#[derive(Debug, Args)]
+pub struct VerifyArgs {
+    /// Commits to check, as git revision arguments (default: commits not yet on the upstream,
+    /// or on no remote)
+    #[arg(value_name = "RANGE")]
+    pub range: Vec<String>,
+
+    /// Check command (overrides `carve.check` and the default)
+    #[arg(long, value_name = "CMD")]
+    pub check: Option<String>,
+
+    /// Tolerate errors the range's base already has: a commit fails only for new ones
+    #[arg(long)]
+    pub no_new_errors: bool,
+
+    /// Read the refs being pushed from a pre-push hook's standard input
+    #[arg(long, conflicts_with = "range")]
+    pub pre_push: bool,
+
+    /// Print the result as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
