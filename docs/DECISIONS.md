@@ -1451,3 +1451,245 @@ errors), and 1 is skipped by the harness's mixed-atom rule.
 **Open:** should carve switch to no-new-errors *automatically* when HEAD fails
 (with the same loud wording), instead of refusing and offering the flag? That changes the
 reading of non-negotiable 3, so it is my call.
+
+## D44. `git carve verify`: every commit on a branch passes the check (research item 1)
+
+**Idea (from the viability research, 2026-10-07).** Local git CLIs plateau at a few thousand
+installs. Real reach comes from becoming a project dependency that runs on every push or in
+CI. "Every commit passes the check" is carve's one unclaimed guarantee, so apply it to commits
+that already exist as well: check each commit of a range, oldest first.
+
+**Round 1 (for).** It reuses everything verification already has: the scratch worktree, the
+tree-keyed cache, the probe, error parsing, and `--no-new-errors`. It never touches the
+working tree, index, or refs, so it is safe as a pre-push hook. And it gives a team product
+surface without a hosted service.
+
+**Round 2 (against).**
+- Tools that run a command on every commit exist: `jj run`, git-branchless `git test run`,
+  and mhagger's `git-test`.
+- `tsc` on every commit can make a push slow.
+- A range default that guesses wrong could check hundreds of commits.
+
+**Round 3 (synthesis: carve's edge is everything around the check).**
+- The default TypeScript check picks the projects that own the changed files (D27).
+- The probe (D1) proves the check reads the changed files. A vacuous check cannot report
+  "all pass"; an explicit one that reads nothing is reported as unverified.
+- `--no-new-errors` measures each commit against the base's errors (D43). Without it, a
+  failure the base shares gets a hint.
+- **Attribution.** A failing commit whose errors all appeared in an earlier commit of the range
+  is reported as inheriting them from that commit, so the culprit is named, as if the bisect
+  were already done.
+- **Speed.** The cache is keyed by tree, so a re-run or a re-push costs nothing. On the demo
+  the first run takes 5.5 s and the second 0.26 s.
+- **Range.** `@{upstream}..HEAD`, else commits on no remote. With no remote it refuses (exit 2)
+  and names an example. `--pre-push` reads the hook's standard input: a deleted ref is
+  skipped, and a new branch checks what no remote has yet.
+- Exit codes are 0 when everything passes and 3 when any commit fails. `--json` is for CI.
+
+**Decision.** Built: `src/branch.rs`, with 8 tests in `tests/branch_verify.rs`. Among them:
+the culprit is named; the working tree, index, and refs are untouched even when dirty and
+staged; a second run is fully cached; pre-push checks only what is pushed; the default
+range; `--no-new-errors`; a vacuous check is reported; and the demo under real `tsc`.
+
+**Found while testing.** Plain `git rev-parse @{upstream}` exits 128 when there is no
+upstream, which carve treated as a crash. `--verify -q` exits 1, quietly, and that is what
+the default range now uses.
+
+## D45. A generic adapter: carve works outside TypeScript (research item 6, extended)
+
+**Finding.** On a Python repository carve fell back to one commit per file. It split a new
+function from its uses and its test, lumped a drive-by fix in with the feature, showed no
+function names, and refused to check at all, with a TypeScript hint (`npx tsc`). The
+viability research ranked "TypeScript only" as a top risk: every successful git tool is
+language-agnostic.
+
+**Round 1 (for).** Most developers who would find carve on GitHub or HN do not write
+TypeScript. `git carve verify` (D44) already works with any check. And the literature's
+cheapest accuracy gain, identifier flow between hunks (Flexeme), is exactly the
+language-agnostic technique.
+
+**Round 2 (against).**
+- A real parser per language means a grammar dependency each.
+- Regex-free scanning is crude: decorators, nested scopes, strings.
+- Linking by name alone can join unrelated hunks that share common words.
+- Giving non-TypeScript files facts changes what the frozen judge sees.
+
+**Round 3 (synthesis).**
+- **One grammar-free adapter** for Python, Go, Rust, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift,
+  Scala, Elixir, Lua, and Dart. It has:
+  - definitions from keyword patterns, their extents from indentation (decorators and
+    attributes included), and their parents from nesting;
+  - imports in the common forms;
+  - every identifier as a reference;
+  - unambiguous debug statements (`breakpoint()`, `pdb.set_trace()`, `binding.pry`, `dbg!`).
+- **It feeds the existing rules,** with no special cases: F0, F1, F2, F3, F6, the F7 drive-by
+  exemption, order constraints, labels.
+- **Name-only resolution** (trait `name_only_resolution`; TypeScript says no). A reference
+  resolves to the one other changed file of the same language that defines it at top level.
+  - `module.name` resolves only when `module` is imported, never for `self.x`.
+  - Common names, and names more than one changed file defines, resolve to nothing.
+- **Default checks by ecosystem**, only when there is no tsconfig at all:
+  - `cargo check --all-targets`;
+  - `go build ./... && go vet ./...`;
+  - `python3 -m compileall -q -f` (labeled "syntax only").
+
+  Otherwise the refusal says how to set a check, with no TypeScript advice.
+- **Checks declare which file types they read.** The probe (D1) breaks only those; other changed
+  source files are reported unverified. Before, a `.py` change in a TypeScript repository
+  passed `tsc` vacuously.
+- **The eval corpus builder** keeps debug injection TypeScript-only (it injects TypeScript), so
+  the locked manifest still rebuilds byte for byte.
+- **F2 keeps the TypeScript stop words** in TypeScript. A first draft used the combined list and
+  shifted two TypeScript-only windows. That was caught by the window-level diff and reverted.
+
+**Found by the probe.** `compileall` trusts a cached `.pyc` whose modification *second* matches,
+without comparing sizes. carve rewrites files within the same second, so a deliberately broken
+file sometimes passed. The probe (D1) caught it intermittently, under parallel tests; `-f`
+fixes it.
+
+**Measured (development corpus of 584 windows of real history: click and httpx in Python,
+cobra and bubbletea in Go, fd in Rust; sources in `eval/dev/polyglot-sources.json`;
+pre-registered variants; never the locked corpus).**
+
+| BCubed F1 | generic off | **generic, all rules** | no F2 | no F2, F7 |
+|---|---|---|---|---|
+| bubbletea | 0.804 | **0.812** | 0.799 | 0.763 |
+| click | 0.740 | **0.768** | 0.734 | 0.652 |
+| cobra | 0.802 | **0.813** | 0.786 | 0.709 |
+| fd | 0.771 | **0.787** | 0.774 | 0.735 |
+| httpx | 0.707 | **0.738** | 0.708 | 0.662 |
+| all | 0.764 | **0.783** | 0.760 | 0.704 |
+
+- **The generic adapter with all rules gains in all five repositories.** Extra commits per window
+  go from 1.92 to 1.72, and E5 stays 0.
+- **My hypothesis that F2 hurts generic files was wrong.** It came from one TypeScript-repository
+  window: a new Python service whose files shared ML vocabulary (0.741 → 0.644). Without F2,
+  results fall below having no adapter at all. The window is recorded as a known case and is
+  not tuned to.
+- **TypeScript is unchanged.** The tune split scores exactly 0.803 with the generic adapter off;
+  with it on, only that window moves (0.802). The frozen judge differs only in that window
+  (0.856 → 0.854).
+
+**Decision.** Adopted for code-only mode. `GIT_CARVE_DEV_NO_GENERIC=1` is the ablation knob.
+
+**Follow-ups:**
+- real grammars where they earn it (Python and Go first);
+- JavaScript through the TypeScript parser, once the probe question for `.js` configs in
+  TypeScript repositories is settled;
+- retraining the judge with generic facts.
+
+## D46. Product direction: from any big change to a verified stack (2026-10-13)
+
+**Question.** Are carve's features ones people would love and use weekly, or are they
+impressive but unused? Two research agents gathered evidence (developer demand, the competitive
+map as of October 2026) and one strategy agent argued independently before this decision.
+
+**Evidence, strongest first:**
+1. **AI-sized PRs choke review.**
+   - Salesforce Engineering (2026-01) reports agent PRs "regularly expanded beyond 20 files and
+     1,000 lines", with reviewers "no longer meaningfully engaging".
+   - A Harvard working paper on Jellyfish data (718 firms) finds PR-to-merge time up 49% after
+     agent adoption.
+   - Godot called AI PRs "draining and demoralizing", and GitHub added PR caps (2026-06-17).
+2. **Turning existing big work into small PRs.**
+   - GitHub's native stacked PRs drew 900 and 783 points on Hacker News and went GA on 2026-10-06.
+   - But `gh stack` has init/add/submit/modify/rebase/merge and no split, and GitHub's own agent
+     skill says to plan the stack before writing code.
+   - Users ask to split after the fact. HN 47758047: "you need to know the final shape of the
+     stack before you start". gh-stack issue #508 asks for `gh stack split`.
+   - LLM splits are called "semantically" wrong (HN 47757676).
+3. **Fixing commits after the fact.**
+   - "Break a previous commit into multiple commits" has 676K Stack Overflow views; "modify a
+     specific commit" has 1.85M.
+   - git-absorb has 5.7K stars, and its top complaint is trust: "how would you know whether it
+     got it right?"
+
+**Weakest:**
+- bisecting inside squash commits: squash-merge is at 39% and growing (arXiv 2608.03007), but no
+  2025–26 complaints were found;
+- "every commit builds" as an abstract virtue: "cared about a lot, by few";
+- checked fixups: single-digit reactions.
+
+**Competitive gaps:**
+- **Re-splitting existing commits is nearly empty.** Every splitter is manual (`git history
+  split`, jj, Sapling, Graphite, lazygit) or LLM-driven. The closest is "preen": file-level,
+  it rolls back instead of re-grouping, it writes messages, and it has 0 stars. A research
+  paper from 2026-10-08 (RucTangle) makes "each commit runnable" the metric, so followers will
+  come.
+- **Nobody turns finished work into a stack that passes the check.**
+- **Crowded:** reviewer-side PR splitting (CodeRabbit, Devin Review, Stage), and prompt-only
+  "atomic commit" agent skills.
+
+**Round 1: what is carve's weakness, really?**
+- The positioning weaknesses ("not for squash-merge teams", "not for solo work") are wrong
+  framings.
+- The value is at **review time**, not in permanent history. Squash-merge discards the commits
+  after they have done their job, and a stack survives squash because each PR squashes on its
+  own. Solo developers with agents make the messiest trees.
+- The one hard blocker is **"uncommitted changes only."** In 2026 the mess is usually already
+  committed: Aider commits every edit, agents commit when asked, humans commit "wip".
+- And "every commit builds" is loved only when it is concrete. In a stack, each layer is a PR
+  with required CI, so carve's check means **every PR in the stack goes green on its first
+  push.**
+
+**Round 2: which flagship?**
+- **Review mode** (split someone else's PR, read-only) attacks the biggest pain, but the surface
+  is wrong: reviewers read in the browser, and the person in pain cannot act alone with a CLI.
+  The space is crowded.
+- **Agent mode** is a channel, not a product, and alone it inherits the uncommitted-only
+  blocker.
+- **A verified stack from any change** answers pains 1 and 2 directly. Re-carving committed
+  work answers pain 3 and removes the blocker.
+- The stack needs the re-carve: the usual input is a pushed PR branch. So the re-carve is the
+  engine and the stack is the surface.
+
+**Round 3: the case against.**
+- *GitHub could ship `gh stack split`.* Then it would be interactive or LLM-driven, without
+  local checks. carve stays the verified, deterministic front end and also feeds Graphite,
+  Sapling and plain branches.
+- *History rewriting scares people* (HN 46159412: "an incomprehensibly goofed git history").
+  Answer:
+  - the final tree is byte-identical to the old tip;
+  - working-tree files are never touched;
+  - `--undo` restores the refs exactly;
+  - merges, non-linear ranges and anything that isn't the user's branch fail closed.
+- *Is a stack manager a tar pit?* Yes: restacking after review belongs to `gh stack`. carve
+  only produces the layers and hands them over.
+
+**Decision.** In order; each phase ships on its own:
+1. **`git carve <range>`: re-carve committed work.**
+   - The input is any linear range of the current branch (one commit, an agent's auto-commits, a
+     whole PR branch), plus any uncommitted changes on top.
+   - The base is the range's base. The new side is the current tree, built by a new snapshot
+     source that diffs two trees; the grouping, ordering and check engine is unchanged.
+   - The old messages appear as `#` comments in the plan buffer, for reference only; carve still
+     writes no message.
+   - Debug-only lines an agent committed come out of history and stay in the working tree.
+   - It fails closed on merge commits and non-linear ranges. Re-carving commits already on a
+     remote needs an explicit flag.
+   - `--undo` restores the branch ref.
+2. **`git carve --stack`:** one branch per carved commit, submitted with `gh stack` when it is
+   installed (otherwise plain branches and the exact commands to run). Each layer passed the
+   check locally. No restacking or merge management.
+3. **An agent gate pack** (Claude Code, Cursor, Codex hooks):
+   - block `git push` until `git carve verify` passes, which needs no new ruling;
+   - a "carve before you push" recipe through `--plan-only --json` and `--plan-file`.
+
+   **Pending ruling: may an agent fill the message lines of the plan file?** carve
+   itself still writes none.
+4. **Gate, not feature: speed.** Reuse incremental build state in the scratch worktree. A
+   3–5-commit carve should take at most about 2× one check.
+
+**Deferred or rejected:**
+- **Review mode:** falls out of phase 1 as `--plan-only` on a PR range. Document it; don't
+  build it as a product.
+- **Bisect inside a commit:** no demand evidence. A documented recipe on phase 1.
+- **Verified absorb:** real trust gap, thin moat. Revisit as "absorb review feedback into the
+  right layer of a stack" after phase 2.
+- **The learned judge:** keep it behind `--judge`; never lead with it.
+
+**Positioning:** "Turn any AI-sized change into a stack your reviewers can read. Every layer
+passes your check before you push. You write the messages."
+
+**Metric:** a second use within 14 days per installer, not stars. Below 30%, suspect speed
+first, then editor friction.

@@ -212,6 +212,9 @@ unicode), random edit scripts, and random subsets and partitions.
 
 ### 6.1 Symbol extraction (tree-sitter)
 
+**Generic adapter (DECISIONS.md D45).** Files in languages without a tree-sitter adapter (Python, Go, Rust, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift, Scala, Elixir, Lua, Dart) get grammar-free facts: definitions from keyword patterns with indentation extents, imports in common forms, identifiers as references, and name-only resolution to the one other changed file of the same language that defines a name at top level. Default checks by ecosystem apply when no tsconfig exists: `cargo check`, `go build` + `go vet`, `python3 -m compileall -f` (syntax only). Each default check declares the file types it reads; the probe (§8.3) targets only those.
+
+
 A `LanguageAdapter` trait for the single v1 language:
 
 ```rust
@@ -764,6 +767,7 @@ git carve eval run [--corpus <manifest>] [--arm code|judge] [--split tune|test] 
 |---|---|
 | `--check <cmd>` | Check command (overrides config and default) |
 | `--no-check` | Skip verification; summary says "unverified" |
+| `verify [RANGE] [--pre-push] [--no-new-errors] [--check CMD] [--json]` | Check every commit of a range (default `@{upstream}..HEAD`, else commits on no remote), oldest first, in the scratch worktree; exit 3 if any fails (DECISIONS.md D44) |
 | `--no-new-errors` | When HEAD already fails the check, commit only what adds no new error to HEAD's (DECISIONS.md D43); the buffer and summary say so |
 | `--no-judge` / `--judge` | Force code-only or judge mode (default: `carve.judge`, which defaults to `none`) |
 | `--plan-only` | Compute and verify, print the plan to stdout, commit nothing |
