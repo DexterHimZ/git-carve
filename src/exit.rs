@@ -16,6 +16,9 @@ pub enum Exit {
     Concurrent,
     /// 5: internal error.
     Internal,
+    /// 6: `--stack --submit` committed and created every layer branch, but submitting the
+    /// stack failed (DECISIONS.md D48). Retrying the printed commands is safe.
+    SubmitFailed,
     /// 129: command-line usage error, as with git's own commands. Kept apart from 2 so a
     /// typo is never mistaken for a refused repository state.
     Usage,
@@ -30,6 +33,7 @@ impl Exit {
             Self::CheckFailed => 3,
             Self::Concurrent => 4,
             Self::Internal => 5,
+            Self::SubmitFailed => 6,
             Self::Usage => 129,
         }
     }

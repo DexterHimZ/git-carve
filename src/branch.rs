@@ -27,6 +27,10 @@ pub struct VerifyOptions {
     pub ranges: Vec<Vec<String>>,
     pub check: Option<String>,
     pub no_new_errors: bool,
+    /// Stop at the first failing commit, for a gate that needs a verdict, not a report
+    /// (`--fail-fast`, implied by `--pre-push`). The D1 probe then runs only when every commit
+    /// passed: it guards against a false pass, and a failure needs no such proof.
+    pub fail_fast: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,8 +48,12 @@ pub struct CommitResult {
     pub inherits_from: Option<String>,
 }
 
+/// The `verify --json` contract version: fields are only ever added within a version.
+pub const JSON_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, Serialize)]
 pub struct BranchReport {
+    pub version: u32,
     pub check: String,
     pub commits: Vec<CommitResult>,
     /// `--no-new-errors`: the error count of the range's base.
@@ -58,12 +66,23 @@ pub struct BranchReport {
     pub runs: usize,
     pub cached: usize,
     pub millis: u64,
+    /// `fail_fast`: commits after the first failure, left unchecked.
+    pub skipped: usize,
 }
 
 impl BranchReport {
     pub fn failed(&self) -> usize {
         self.commits.iter().filter(|c| !c.passed).count()
     }
+}
+
+/// `carve.noNewErrors` (D50): verify, the pre-push hook and the agent gate tolerate errors the
+/// range's base already has, as `--no-new-errors` does, in a repository whose HEAD fails.
+pub fn no_new_errors_config(repo: &Repo) -> Result<bool> {
+    Ok(repo
+        .git
+        .try_run_str(["config", "--type=bool", "carve.noNewErrors"])?
+        .is_some_and(|v| v.trim() == "true"))
 }
 
 /// The range a plain `git carve verify` checks: commits not on the upstream, or, without one,
@@ -91,8 +110,9 @@ pub fn default_ranges(repo: &Repo) -> Result<Vec<Vec<String>>> {
 }
 
 /// Ranges from a pre-push hook's standard input: `<local ref> <local oid> <remote ref> <remote oid>`
-/// per line. A deleted ref is skipped; a new branch verifies what no remote has yet.
-pub fn pre_push_ranges(stdin: &str, zero: &str) -> Vec<Vec<String>> {
+/// per line. A deleted ref is skipped; a new branch, or a remote commit this repository does
+/// not have (a teammate's push, not fetched), verifies what no remote has yet.
+pub fn pre_push_ranges(stdin: &str, zero: &str, known: impl Fn(&str) -> bool) -> Vec<Vec<String>> {
     stdin
         .lines()
         .filter_map(|line| {
@@ -102,7 +122,7 @@ pub fn pre_push_ranges(stdin: &str, zero: &str) -> Vec<Vec<String>> {
             };
             if local == zero {
                 None
-            } else if remote == zero {
+            } else if remote == zero || !known(remote) {
                 Some(vec![
                     local.to_owned(),
                     "--not".to_owned(),
@@ -189,6 +209,7 @@ pub fn verify_branch(repo: &Repo, opts: &VerifyOptions) -> Result<BranchReport> 
     let mut checker = Checker::new(repo, spec, &carved)?;
     checker.no_new_errors = opts.no_new_errors;
     let mut report = BranchReport {
+        version: JSON_VERSION,
         check: checker.spec.display.clone(),
         commits: Vec::new(),
         baseline_errors: None,
@@ -197,6 +218,7 @@ pub fn verify_branch(repo: &Repo, opts: &VerifyOptions) -> Result<BranchReport> 
         runs: 0,
         cached: 0,
         millis: 0,
+        skipped: 0,
     };
     let Some((first, _)) = commits.first() else {
         return Ok(report);
@@ -223,13 +245,24 @@ pub fn verify_branch(repo: &Repo, opts: &VerifyOptions) -> Result<BranchReport> 
     }
 
     // D1: the check must fail on a deliberately broken changed file.
-    let last = &commits.last().expect("non-empty").0;
-    probe(repo, &mut checker, &tree(last)?, &changed, &mut report)?;
+    let last_tree = tree(&commits.last().expect("non-empty").0)?;
+    if !opts.fail_fast {
+        probe(repo, &mut checker, &last_tree, &changed, &mut report)?;
+    }
 
     // Error identities (D43's position-free keys) already seen, and which commit introduced each.
     let mut seen: Vec<(String, String)> = Vec::new();
-    for (oid, subject) in &commits {
-        let outcome = checker.check(&tree(oid)?)?;
+    // D51: up to `jobs` commits at once; with `fail_fast`, nothing after the first failure.
+    let trees = commits
+        .iter()
+        .map(|(oid, _)| tree(oid))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let outcomes = checker.check_many(&trees, opts.fail_fast)?;
+    for (i, ((oid, subject), outcome)) in commits.iter().zip(outcomes).enumerate() {
+        let Some(outcome) = outcome else {
+            report.skipped = commits.len() - i;
+            break;
+        };
         let keys: Vec<String> = outcome
             .errors
             .iter()
@@ -267,6 +300,9 @@ pub fn verify_branch(repo: &Repo, opts: &VerifyOptions) -> Result<BranchReport> 
             },
             inherits_from,
         });
+    }
+    if opts.fail_fast && report.failed() == 0 {
+        probe(repo, &mut checker, &last_tree, &changed, &mut report)?;
     }
 
     // A failure that the base shares is worth a hint (D43).

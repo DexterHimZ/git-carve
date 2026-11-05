@@ -223,7 +223,9 @@ pub fn atomize(repo: &Repo, snap: &Snapshot) -> Result<Changes> {
                 return Err(Error::Internal(format!("{} has no sides", show(&f.path))));
             }
             (None, Some(new)) => {
-                let leave = new.mode != Mode::LINK
+                // Only untracked files: a range carve keeps what HEAD already committed.
+                let leave = !f.in_head
+                    && new.mode != Mode::LINK
                     && (sizes[new.oid.as_str()] > LARGE_UNTRACKED
                         || blobs.get(new.oid.as_str()).is_none_or(|b| is_binary(b)));
                 drafts.push((fi, AtomKind::Whole(Whole::Added), leave));
@@ -363,7 +365,7 @@ fn structural_binds(repo: &Repo, snap: &Snapshot, changes: &Changes) -> Result<V
     let has_deleted = changes.files.iter().any(|f| f.new.is_none());
     let has_added = changes.files.iter().any(|f| f.base.is_none());
     if has_deleted && has_added {
-        let mut builder = TreeBuilder::new(repo, "renames", &snap.head.tree)?;
+        let mut builder = TreeBuilder::new(repo, "renames", &snap.base.tree)?;
         let all = |_: AtomId| true;
         let updates = (0..changes.files.len())
             .map(|i| (changes.files[i].path.clone(), changes.target(i, &all)))
@@ -376,7 +378,7 @@ fn structural_binds(repo: &Repo, snap: &Snapshot, changes: &Changes) -> Result<V
             "-M",
             "-z",
             "--name-status",
-            &snap.head.tree,
+            &snap.base.tree,
             &final_tree,
         ])?;
         let mut fields = out.split(|&b| b == 0).filter(|f| !f.is_empty());

@@ -672,6 +672,15 @@ pub fn edges(changes: &Changes, analysis: &Analysis) -> Edges {
             }
         }
     }
+    // B5 (D48): a new use of a dependency travels with the manifest line that adds it, and
+    // dropping the last use with the line that removes it.
+    if !std::env::var("GIT_CARVE_DEV_DISABLE_EDGES")
+        .unwrap_or_default()
+        .split(',')
+        .any(|k| k.trim() == "B5")
+    {
+        hard.extend(crate::manifest::binds(changes, analysis));
+    }
     // Soft affinities (code-only mode unions them), among atoms that take part in edges.
     let joins = |i: usize| matches!(facts[i].class, Class::Normal);
     // Dev-only ablation knob for the eval harness: `GIT_CARVE_DEV_DISABLE_EDGES=F1,F2`.

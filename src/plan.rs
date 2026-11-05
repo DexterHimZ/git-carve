@@ -41,6 +41,82 @@ pub struct RenderOptions<'a> {
 }
 
 pub fn render(changes: &Changes, analysis: &Analysis, plan: &Plan, opts: &RenderOptions) -> String {
+    render_range(changes, analysis, plan, opts, None)
+}
+
+/// What a range carve adds to the buffer (D46 phase 1): the old commits, and where each
+/// atom's lines came from.
+pub struct RangeView<'a> {
+    pub base: &'a crate::precondition::ResolvedBase,
+    pub sources: &'a crate::attribution::Sources,
+}
+
+/// `# from: 57468c8 wip (12 lines), uncommitted (2 lines)`: the old commits a block's lines
+/// come from, oldest first. At column 0, so the parser reads it as a comment.
+fn from_line(view: &RangeView, group: &[AtomId]) -> Option<String> {
+    let mut lines: Vec<(Option<&str>, u32, bool)> = Vec::new();
+    for id in group {
+        for (oid, n) in view.sources.get(id).into_iter().flatten() {
+            let key = oid.as_deref();
+            match lines.iter_mut().find(|(k, _, _)| *k == key) {
+                Some((_, total, whole)) => {
+                    *total += n;
+                    *whole |= *n == 0;
+                }
+                None => lines.push((key, *n, *n == 0)),
+            }
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let order = |k: Option<&str>| {
+        k.and_then(|oid| view.base.commits.iter().position(|c| c.oid == oid))
+            .unwrap_or(usize::MAX)
+    };
+    lines.sort_by_key(|(k, _, _)| order(*k));
+    let parts: Vec<String> = lines
+        .iter()
+        .map(|(k, n, whole)| {
+            let name = match k {
+                Some(oid) => {
+                    let subject = view
+                        .base
+                        .commits
+                        .iter()
+                        .find(|c| c.oid == *oid)
+                        .map_or("", |c| c.subject.as_str());
+                    let subject: String = subject.chars().take(40).collect();
+                    format!("{} {subject}", &oid[..oid.len().min(7)])
+                }
+                None => "uncommitted".to_owned(),
+            };
+            let size = match (n, whole) {
+                (0, _) => "file".to_owned(),
+                (1, false) => "1 line".to_owned(),
+                (n, false) => format!("{n} lines"),
+                (n, true) => format!("file, {n} line{}", if *n == 1 { "" } else { "s" }),
+            };
+            format!("{name} ({size})")
+        })
+        .collect();
+    Some(format!("# from: {}", parts.join(", ")))
+}
+
+/// The most subjects the range header lists before "and N more".
+const RANGE_LISTED: usize = 20;
+
+/// [`render`] for `git carve <base>`: the header also lists the commits being re-carved,
+/// as comments. Their messages are for reference only; nothing is copied into a commit.
+pub fn render_range(
+    changes: &Changes,
+    analysis: &Analysis,
+    plan: &Plan,
+    opts: &RenderOptions,
+    view: Option<&RangeView>,
+) -> String {
+    let view = view.filter(|v| !v.base.commits.is_empty());
+    let range = view.map(|v| v.base);
     let mut out = String::new();
     let commits = plan.groups.len();
     let left = plan.leave.len();
@@ -55,7 +131,8 @@ pub fn render(changes: &Changes, analysis: &Analysis, plan: &Plan, opts: &Render
                 Some(e) => {
                     let _ = writeln!(
                         out,
-                        "{counts} HEAD already fails the check with {e} error{}; no commit below adds a new one: {}",
+                        "{counts} {} already fails the check with {e} error{}; no commit below adds a new one: {}",
+                        if range.is_some() { "The base" } else { "HEAD" },
                         if e == 1 { "" } else { "s" },
                         v.check
                     );
@@ -108,6 +185,42 @@ pub fn render(changes: &Changes, analysis: &Analysis, plan: &Plan, opts: &Render
             let _ = writeln!(out, "{counts} These commits are NOT verified (--no-check).");
         }
     }
+    if let Some(r) = range {
+        let k = r.commits.len();
+        let _ = writeln!(
+            out,
+            "#\n# Re-carving {k} commit{} since {}, plus any uncommitted changes.\n\
+             # Their old messages, for reference only (nothing is copied into a commit):",
+            if k == 1 { "" } else { "s" },
+            &r.oid[..r.oid.len().min(7)]
+        );
+        for c in r.commits.iter().take(RANGE_LISTED) {
+            let subject = if c.subject.is_empty() {
+                "(no subject)"
+            } else {
+                &c.subject
+            };
+            let _ = writeln!(out, "#   {} {subject}", &c.oid[..c.oid.len().min(7)]);
+        }
+        if k > RANGE_LISTED {
+            let _ = writeln!(out, "#   ... and {} more", k - RANGE_LISTED);
+        }
+        let mut authors: Vec<&str> = r.commits.iter().map(|c| c.author.as_str()).collect();
+        authors.sort_unstable();
+        authors.dedup();
+        if authors.len() > 1 {
+            let _ = writeln!(out, "#   authors: {}", authors.join(", "));
+        }
+        if !r.trailers.is_empty() {
+            let _ = writeln!(
+                out,
+                "# Trailers from those messages (copy any you want to keep):"
+            );
+            for t in &r.trailers {
+                let _ = writeln!(out, "#   {t}");
+            }
+        }
+    }
     out.push_str(
         "#\n\
          # Write a message under each \"commit\" line (first line = subject).\n\
@@ -134,6 +247,9 @@ pub fn render(changes: &Changes, analysis: &Analysis, plan: &Plan, opts: &Render
         }
         for &id in group {
             let _ = writeln!(out, "{}", atom_line(changes, analysis, plan, id));
+        }
+        if let Some(from) = view.and_then(|v| from_line(v, group)) {
+            let _ = writeln!(out, "{from}");
         }
         if opts.unsure {
             for (_, note) in plan.unsure.iter().filter(|(g, _)| *g == k) {
@@ -559,6 +675,26 @@ impl Fnv {
     fn finish(&self) -> u64 {
         self.0
     }
+}
+
+/// D49: every message line of a plan buffer becomes a `# proposed:` comment, so only the
+/// human's own typing can fill a message. Comments, atom lines, and blank lines stay.
+pub fn messages_as_proposals(text: &str) -> String {
+    let mut in_message = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if line == "commit" {
+            in_message = true;
+        } else if line == "leave" || trimmed.starts_with('@') {
+            in_message = false;
+        } else if in_message && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            out.push_str("# proposed: ");
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]

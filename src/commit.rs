@@ -28,6 +28,14 @@ pub struct Hooks<'a> {
     pub before_ref_update: Option<&'a dyn Fn()>,
 }
 
+/// A stack layer branch carve created (D48): undo deletes it if it still points here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackRef {
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub oid: String,
+}
+
 /// Written to `<git-path carve>/undo.json` after a successful run (§10.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UndoRecord {
@@ -40,6 +48,13 @@ pub struct UndoRecord {
     pub commits: Vec<String>,
     pub left: Vec<String>,
     pub created_at: String,
+    /// `--stack` layer branches, bottom first (D48); absent in records from older runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<StackRef>,
+    /// Where the plan and its messages came from (D49): `editor`, `plan-file+edit` (a human
+    /// reviewed a plan file in the editor) or `plan-file` (no editor; `carve.agentMessages`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_source: Option<String>,
 }
 
 pub fn commit(
@@ -49,6 +64,28 @@ pub fn commit(
     groups: &[Group],
     hooks: &Hooks,
 ) -> Result<UndoRecord> {
+    commit_stacked(repo, snap, changes, groups, hooks, &[], None)
+}
+
+/// [`commit`] plus one new branch per commit but the last (`--stack`, D48): `layers[k]`
+/// is created at commit k only if it does not exist, after the race guard and before the
+/// main compare-and-swap, and deleted again if that fails.
+pub fn commit_stacked(
+    repo: &Repo,
+    snap: &Snapshot,
+    changes: &Changes,
+    groups: &[Group],
+    hooks: &Hooks,
+    layers: &[String],
+    plan_source: Option<&str>,
+) -> Result<UndoRecord> {
+    if !layers.is_empty() && layers.len() + 1 != groups.len() {
+        return Err(Error::Internal(format!(
+            "{} stack layers for {} commits",
+            layers.len(),
+            groups.len()
+        )));
+    }
     let left = validate(changes, groups)?;
     let messages = groups
         .iter()
@@ -58,10 +95,10 @@ pub fn commit(
 
     // Trees, one per group, each rebuilt from the base plus every atom so far.
     let atom_groups: Vec<Vec<AtomId>> = groups.iter().map(|g| g.atoms.clone()).collect();
-    let trees = prefix_trees(repo, &snap.head.tree, changes, &atom_groups)?;
+    let trees = prefix_trees(repo, &snap.base.tree, changes, &atom_groups)?;
 
     let sign = repo.config_bool("commit.gpgSign", false)?;
-    let mut parent = snap.head.commit.clone();
+    let mut parent = snap.base.commit.clone();
     let mut commits = Vec::with_capacity(groups.len());
     for (tree, message) in trees.iter().zip(&messages) {
         let mut args = vec!["commit-tree", tree.as_str(), "-p", parent.as_str()];
@@ -88,8 +125,39 @@ pub fn commit(
     if let Some(hook) = hooks.before_ref_update {
         hook();
     }
+    let mut stack = Vec::with_capacity(layers.len());
+    let null = repo.format.null_oid();
+    for (k, name) in layers.iter().enumerate() {
+        let ref_name = format!("refs/heads/{name}");
+        let msg = format!("carve: stack layer {} of {}", k + 1, commits.len());
+        if repo
+            .git
+            .run(["update-ref", "-m", &msg, &ref_name, &commits[k], &null])
+            .is_err()
+        {
+            remove_layers(repo, &stack);
+            return Err(Error::Concurrent(format!(
+                "branch {name} appeared during carve; nothing was changed, re-run"
+            )));
+        }
+        stack.push(StackRef {
+            ref_name,
+            oid: commits[k].clone(),
+        });
+    }
 
-    let reflog = format!("carve: {} commits", commits.len());
+    let mut reflog = if snap.base.commit == snap.head.commit {
+        format!("carve: {} commits", commits.len())
+    } else {
+        format!(
+            "carve: re-carved since {} into {} commits",
+            &snap.base.commit[..snap.base.commit.len().min(7)],
+            commits.len()
+        )
+    };
+    if plan_source == Some("plan-file") {
+        reflog.push_str(" (plan file)");
+    }
     let (ref_name, update) = match &snap.head.branch {
         Some(branch) => (
             branch.clone(),
@@ -110,6 +178,7 @@ pub fn commit(
         ),
     };
     if update.is_err() {
+        remove_layers(repo, &stack);
         return Err(Error::Concurrent(format!(
             "{ref_name} moved during carve; nothing was changed, re-run"
         )));
@@ -124,6 +193,8 @@ pub fn commit(
         commits,
         left: left.iter().map(|&id| changes.position(id)).collect(),
         created_at: rfc3339_utc(SystemTime::now()),
+        stack,
+        plan_source: plan_source.map(str::to_owned),
     };
     write_undo(repo, &record)?;
 
@@ -185,6 +256,22 @@ fn clean_message(repo: &Repo, k: usize, message: &str) -> Result<String> {
         )));
     }
     Ok(cleaned)
+}
+
+/// Deletes layer branches that still point where carve put them; returns the ones that
+/// moved (kept).
+pub fn remove_layers(repo: &Repo, stack: &[StackRef]) -> Vec<String> {
+    let mut kept = Vec::new();
+    for s in stack {
+        if repo
+            .git
+            .run(["update-ref", "-d", &s.ref_name, &s.oid])
+            .is_err()
+        {
+            kept.push(s.ref_name.trim_start_matches("refs/heads/").to_owned());
+        }
+    }
+    kept
 }
 
 pub fn undo_path(repo: &Repo) -> std::path::PathBuf {

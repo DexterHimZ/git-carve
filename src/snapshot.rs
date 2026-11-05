@@ -12,6 +12,15 @@ use crate::model::{Entry, Mode, show};
 use crate::precondition::{MAX_PATHS, staged_changes};
 use crate::repo::Repo;
 
+/// What new commits build on: their first parent and the tree atoms are diffed against.
+/// Plain `git carve` uses HEAD; a range carve (D46 phase 1) uses the range's base, while
+/// `Head` stays the ref the compare-and-swap and the race guard check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Base {
+    pub commit: String,
+    pub tree: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
     pub commit: String,
@@ -39,11 +48,15 @@ pub struct FileSnap {
     pub filtered: bool,
     /// `-diff` or `binary` attribute: whole-file only.
     pub binary_attr: bool,
+    /// The path is in HEAD's tree. Only untracked files are left out by default for being
+    /// large or binary; a range carve must keep a file that HEAD already committed.
+    pub in_head: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub head: Head,
+    pub base: Base,
     /// Sorted by path bytes.
     pub files: Vec<FileSnap>,
 }
@@ -57,6 +70,11 @@ struct Changed {
 }
 
 pub fn take(repo: &Repo) -> Result<Snapshot> {
+    take_worktree(repo, false)
+}
+
+/// HEAD against the working tree. `allow_clean` lets a range carve start from a clean tree.
+fn take_worktree(repo: &Repo, allow_clean: bool) -> Result<Snapshot> {
     let head = read_head(repo)?;
     let status = repo.git.run([
         "status",
@@ -66,7 +84,7 @@ pub fn take(repo: &Repo) -> Result<Snapshot> {
         "--no-renames",
     ])?;
     let changed = parse_status(&status)?;
-    if changed.is_empty() {
+    if changed.is_empty() && !allow_clean {
         return Err(precondition(
             "nothing to carve: the working tree is clean",
             None,
@@ -91,14 +109,7 @@ pub fn take(repo: &Repo) -> Result<Snapshot> {
         let fs_path = repo.path_of(&c.path);
         let meta =
             fs::symlink_metadata(&fs_path).map_err(io(format!("read {}", fs_path.display())))?;
-        stats[i] = Some(Stat {
-            size: meta.len(),
-            mtime_ns: meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos() as i128),
-        });
+        stats[i] = Some(stat_of(&meta));
         let kind = meta.file_type();
         if kind.is_symlink() {
             let target =
@@ -151,6 +162,7 @@ pub fn take(repo: &Repo) -> Result<Snapshot> {
                 _ => None,
             };
             FileSnap {
+                in_head: c.base.is_some(),
                 path: c.path,
                 base: c.base,
                 new,
@@ -161,17 +173,156 @@ pub fn take(repo: &Repo) -> Result<Snapshot> {
         })
         .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(Snapshot { head, files })
+    let base = Base {
+        commit: head.commit.clone(),
+        tree: head.tree.clone(),
+    };
+    Ok(Snapshot { head, base, files })
+}
+
+/// Every change since `base` (a resolved commit, an ancestor of HEAD): the commits in
+/// `base..HEAD` plus the working tree on top (D46 phase 1). The snapshot's `base` is that
+/// commit, and `head` stays HEAD for the compare-and-swap and the race guard. `None`, or a
+/// base equal to HEAD, is a plain carve.
+pub fn take_since(repo: &Repo, base: Option<&str>) -> Result<Snapshot> {
+    let Some(base) = base else {
+        return take(repo);
+    };
+    let mut snap = take_worktree(repo, true)?;
+    if base == snap.head.commit {
+        return take(repo);
+    }
+    let base_tree = repo
+        .git
+        .run_str(["rev-parse", &format!("{base}^{{tree}}")])?;
+    let raw = repo.git.run([
+        "diff-tree",
+        "-r",
+        "--raw",
+        "--no-renames",
+        "-z",
+        base,
+        &snap.head.commit,
+    ])?;
+    let committed = parse_raw(&raw)?;
+    let mut extra = Vec::new();
+    for (path, in_base, in_head) in committed {
+        match snap
+            .files
+            .binary_search_by(|f| f.path.as_slice().cmp(&path))
+        {
+            // Dirty too: the working tree is the new side, the base side comes from `base`.
+            Ok(i) => snap.files[i].base = in_base,
+            Err(_) => extra.push((path, in_base, in_head)),
+        }
+    }
+    if !extra.is_empty() {
+        let paths: Vec<Vec<u8>> = extra.iter().map(|(p, _, _)| p.clone()).collect();
+        let attrs = attributes_of(repo, &paths)?;
+        for (path, in_base, in_head) in extra {
+            let fs_path = repo.path_of(&path);
+            let stat = match (&in_head, fs::symlink_metadata(&fs_path)) {
+                (Some(_), Ok(meta)) => Some(stat_of(&meta)),
+                _ => None,
+            };
+            let (filtered, binary_attr) = attrs.get(&path).copied().unwrap_or_default();
+            snap.files.push(FileSnap {
+                in_head: in_head.is_some(),
+                path,
+                base: in_base,
+                new: in_head,
+                stat,
+                filtered,
+                binary_attr,
+            });
+        }
+        snap.files.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    // A path the working tree changed back to its base content has no net change.
+    snap.files.retain(|f| f.base != f.new);
+    let short = &base[..base.len().min(7)];
+    if snap.files.is_empty() {
+        return Err(precondition(
+            format!("{short}..HEAD changes nothing net, and the working tree is clean"),
+            Some(&format!("`git reset --soft {short}` is what you want")),
+        ));
+    }
+    if snap.files.len() > MAX_PATHS {
+        return Err(precondition(
+            format!(
+                "{} changed paths since {short} is more than {MAX_PATHS}",
+                snap.files.len()
+            ),
+            Some("carve a shorter range, for example `git carve HEAD~3`"),
+        ));
+    }
+    snap.base = Base {
+        commit: base.to_owned(),
+        tree: base_tree,
+    };
+    Ok(snap)
+}
+
+/// `(path, entry at base, entry at HEAD)` from `git diff-tree -r --raw -z`.
+type RawChange = (Vec<u8>, Option<Entry>, Option<Entry>);
+
+fn parse_raw(raw: &[u8]) -> Result<Vec<RawChange>> {
+    let mut out = Vec::new();
+    let mut parts = raw.split(|&b| b == 0).filter(|p| !p.is_empty());
+    while let Some(meta) = parts.next() {
+        let path = parts
+            .next()
+            .ok_or_else(|| Error::Internal("diff-tree record without a path".into()))?;
+        // `:<old mode> <new mode> <old oid> <new oid> <status>`
+        let fields: Vec<&[u8]> = meta
+            .strip_prefix(b":")
+            .unwrap_or(meta)
+            .split(|&b| b == b' ')
+            .collect();
+        let [old_mode, new_mode, old_oid, new_oid, _status] = fields[..] else {
+            return Err(Error::Internal(format!(
+                "unexpected diff-tree record: {}",
+                show(meta)
+            )));
+        };
+        if old_mode == b"160000" || new_mode == b"160000" {
+            return Err(precondition(
+                format!(
+                    "submodule {} changes inside the range; submodules are not supported",
+                    show(path)
+                ),
+                None,
+            ));
+        }
+        let entry = |mode: &[u8], oid: &[u8]| -> Result<Option<Entry>> {
+            if mode == b"000000" {
+                return Ok(None);
+            }
+            let mode = Mode::parse(mode)
+                .ok_or_else(|| Error::Internal(format!("bad mode in diff-tree: {}", show(meta))))?;
+            Ok(Some(Entry {
+                mode,
+                oid: String::from_utf8_lossy(oid).into_owned(),
+            }))
+        };
+        out.push((
+            path.to_vec(),
+            entry(old_mode, old_oid)?,
+            entry(new_mode, new_oid)?,
+        ));
+    }
+    Ok(out)
 }
 
 /// `Some(reason)` if HEAD, the branch, or any changed path differs from `before` (§10.3).
 pub fn changed_since(repo: &Repo, before: &Snapshot) -> Result<Option<String>> {
-    let after = match take(repo) {
+    let base = (before.base.commit != before.head.commit).then_some(before.base.commit.as_str());
+    let after = match take_since(repo, base) {
         Ok(after) => after,
         Err(Error::Precondition(reason)) => return Ok(Some(reason)),
         Err(err) => return Err(err),
     };
-    if after.head != before.head {
+    if after.head != before.head || after.base != before.base {
         return Ok(Some("HEAD moved".into()));
     }
     if after.files.len() != before.files.len() {
@@ -183,6 +334,17 @@ pub fn changed_since(repo: &Repo, before: &Snapshot) -> Result<Option<String>> {
         }
     }
     Ok(None)
+}
+
+fn stat_of(meta: &fs::Metadata) -> Stat {
+    Stat {
+        size: meta.len(),
+        mtime_ns: meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i128),
+    }
 }
 
 fn read_head(repo: &Repo) -> Result<Head> {
@@ -294,9 +456,14 @@ fn parse_status(raw: &[u8]) -> Result<Vec<Changed>> {
 
 /// `(filtered, binary)` per path, from `.gitattributes`.
 fn attributes(repo: &Repo, changed: &[Changed]) -> Result<HashMap<Vec<u8>, (bool, bool)>> {
+    let paths: Vec<Vec<u8>> = changed.iter().map(|c| c.path.clone()).collect();
+    attributes_of(repo, &paths)
+}
+
+fn attributes_of(repo: &Repo, paths: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, (bool, bool)>> {
     let mut input = Vec::new();
-    for c in changed {
-        input.extend_from_slice(&c.path);
+    for path in paths {
+        input.extend_from_slice(path);
         input.push(0);
     }
     let out = repo.git.run_with_stdin(

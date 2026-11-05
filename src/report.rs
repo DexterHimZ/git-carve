@@ -55,6 +55,36 @@ struct JsonPlan<'a> {
     edges: &'a [(AtomId, AtomId, Vec<&'static str>)],
     diagnostics: &'a Diagnostics,
     verification: Option<&'a Verification>,
+    /// `git carve <base>` only (D46 phase 1): what was re-carved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    range: Option<JsonRange<'a>>,
+    /// The plan buffer exactly as `--plan-only` prints it (D50): an agent saves it, adds
+    /// `# proposed:` lines, and the human runs `--plan-file <file> --edit` (D49).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buffer: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct JsonRange<'a> {
+    base: &'a str,
+    merge_based: bool,
+    commits: Vec<JsonRangeCommit<'a>>,
+    /// Per atom: the old commits its lines come from (`oid` null: uncommitted; `lines` 0:
+    /// the whole file).
+    sources: std::collections::BTreeMap<AtomId, Vec<JsonSource<'a>>>,
+}
+
+#[derive(Serialize)]
+struct JsonSource<'a> {
+    oid: Option<&'a str>,
+    lines: u32,
+}
+
+#[derive(Serialize)]
+struct JsonRangeCommit<'a> {
+    oid: &'a str,
+    subject: &'a str,
+    author: &'a str,
 }
 
 #[derive(Serialize)]
@@ -73,6 +103,27 @@ pub fn json(
     analysis: &Analysis,
     plan: &Plan,
     verification: Option<&Verification>,
+) -> String {
+    json_range(
+        changes,
+        analysis,
+        plan,
+        verification,
+        None,
+        &crate::attribution::Sources::new(),
+        None,
+    )
+}
+
+/// [`json`] plus the re-carved range, when there is one.
+pub fn json_range(
+    changes: &Changes,
+    analysis: &Analysis,
+    plan: &Plan,
+    verification: Option<&Verification>,
+    range: Option<&crate::precondition::ResolvedBase>,
+    sources: &crate::attribution::Sources,
+    buffer: Option<&str>,
 ) -> String {
     let atoms = changes
         .atoms
@@ -108,6 +159,34 @@ pub fn json(
         edges: &plan.edges,
         diagnostics: &plan.diagnostics,
         verification,
+        range: range.filter(|r| !r.commits.is_empty()).map(|r| JsonRange {
+            base: &r.oid,
+            merge_based: r.merge_based,
+            commits: r
+                .commits
+                .iter()
+                .map(|c| JsonRangeCommit {
+                    oid: &c.oid,
+                    subject: &c.subject,
+                    author: &c.author,
+                })
+                .collect(),
+            sources: sources
+                .iter()
+                .map(|(id, list)| {
+                    (
+                        *id,
+                        list.iter()
+                            .map(|(oid, lines)| JsonSource {
+                                oid: oid.as_deref(),
+                                lines: *lines,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }),
+        buffer,
     };
     serde_json::to_string_pretty(&doc).expect("plan serializes") + "\n"
 }

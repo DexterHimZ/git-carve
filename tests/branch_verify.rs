@@ -161,12 +161,75 @@ fn pre_push_checks_only_what_is_being_pushed() {
         .iter()
         .map(|c| c["oid"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        checked,
-        vec![oids[1].as_str(), oids[2].as_str()],
-        "the deleted ref is skipped"
-    );
+    // Two commits are pushed (the deleted ref adds none); --pre-push fails fast, so the
+    // failing first one ends the run.
+    assert_eq!(checked, vec![oids[1].as_str()], "{doc}");
+    assert_eq!(doc["skipped"], 1, "{doc}");
     assert_eq!(out.status.code(), Some(3), "the push is blocked");
+}
+
+/// The review of D48 (2026-10-14): a gate needs a verdict, not a report. `--fail-fast` stops
+/// at the first failing commit and skips the D1 probe, which only guards a pass.
+#[test]
+fn fail_fast_stops_at_the_first_failing_commit() {
+    let (repo, oids) = three_commits();
+    let out = repo
+        .carve()
+        .args([
+            "verify",
+            "HEAD~3..HEAD",
+            "--fail-fast",
+            "--json",
+            "--check",
+            TSC_LIKE,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let doc = json(&out);
+    assert_eq!(doc["version"], 1);
+    assert_eq!(passed(&doc), vec![true, false]);
+    assert_eq!(doc["commits"][1]["oid"], oids[1].as_str());
+    assert_eq!(doc["skipped"], 1);
+
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~3..HEAD", "--fail-fast", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("git carve verify: 3 commits")
+            && text.contains("Stopped there: 1 later commit was not checked.")
+            && text.contains("hint: to re-split"),
+        "{text}"
+    );
+}
+
+#[test]
+fn fail_fast_still_probes_a_passing_range() {
+    let repo = TestRepo::new();
+    repo.write("src/a.ts", "export const a = 1;\n");
+    repo.commit_all("base");
+    repo.write("src/a.ts", "export const a = 2;\n");
+    repo.commit_all("change a");
+    let doc = json(
+        &repo
+            .carve()
+            .args([
+                "verify",
+                "HEAD~1..HEAD",
+                "--fail-fast",
+                "--json",
+                "--check",
+                "true",
+            ])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(passed(&doc), vec![true]);
+    assert_eq!(doc["skipped"], 0);
+    assert_eq!(doc["unverified"], serde_json::json!(["src/a.ts"]));
 }
 
 #[test]
@@ -317,4 +380,88 @@ fn demo_commits_are_verified_with_real_tsc() {
             .contains("TS2552")
     );
     assert!(doc["commits"][2]["inherits_from"].is_string());
+}
+
+#[test]
+fn one_failing_commit_reads_singular_and_suggests_a_re_carve() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "ok\n");
+    repo.write("b.txt", "ok\n");
+    repo.write("c.txt", "ok\n");
+    repo.commit_all("base");
+    repo.write("a.txt", "fine\n");
+    repo.commit_all("good one");
+    repo.write("b.txt", "BROKEN\n");
+    repo.commit_all("bad one");
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~2..HEAD", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("1 of 2 commits does not pass the check."),
+        "{text}"
+    );
+    assert!(text.contains("git carve @{u}"), "{text}");
+}
+
+/// D50 review: git exports GIT_DIR to a pre-push hook run in a linked worktree. The
+/// scratch worktree's `read-tree -u` must not follow it into the user's index.
+#[test]
+fn safety_verify_ignores_an_inherited_git_dir() {
+    let (repo, _) = three_commits();
+    let wt = tempfile::tempdir().unwrap();
+    let wt_path = wt.path().join("wt");
+    repo.run(&["worktree", "add", "-q", wt_path.to_str().unwrap(), "HEAD"]);
+    let gitdir = repo.run(&["rev-parse", "--absolute-git-dir"]);
+    let linked = format!("{}/worktrees/wt", gitdir.trim());
+    let out = common::carve_in(&wt_path)
+        .env("GIT_DIR", &linked)
+        .args(["verify", "HEAD~3..HEAD~2", "--check", "true"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let status = std::process::Command::new("git")
+        .current_dir(&wt_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&status.stdout),
+        "",
+        "the worktree's index is untouched"
+    );
+}
+
+/// D50 review: a pushed-over remote commit this repository never fetched falls back
+/// to "what no remote has", instead of failing the push on a git error.
+#[test]
+fn pre_push_with_an_unknown_remote_commit_still_checks() {
+    let (repo, oids) = three_commits();
+    let unknown = "e".repeat(oids[0].len());
+    let stdin = format!("refs/heads/main {} refs/heads/main {unknown}\n", oids[2]);
+    let mut child = repo
+        .carve()
+        .args(["verify", "--pre-push", "--json", "--check", TSC_LIKE])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "checked, and blocked: {}",
+        stderr(&out)
+    );
+    assert!(!json(&out)["commits"].as_array().unwrap().is_empty());
 }

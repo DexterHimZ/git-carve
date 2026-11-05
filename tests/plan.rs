@@ -347,6 +347,8 @@ fn a_regroup_that_fails_the_check_reopens_then_succeeds() {
 #[test]
 fn plan_file_runs_without_an_editor() {
     let repo = TestRepo::demo();
+    // D49: messages in a plan file need the repository's opt-in.
+    repo.run(&["config", "carve.agentMessages", "true"]);
     let plan_out = repo
         .carve()
         .args(["--plan-only", "--no-check"])
@@ -362,6 +364,16 @@ fn plan_file_runs_without_an_editor() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(repo.run(&["rev-list", "--count", "HEAD"]), "4");
+    // Auditable: the undo record, the reflog and the summary say where the messages came from.
+    let undo = repo.run(&["rev-parse", "--git-path", "carve/undo.json"]);
+    let undo: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.path().join(undo.trim())).unwrap()).unwrap();
+    assert_eq!(undo["plan_source"], "plan-file");
+    assert!(
+        repo.run(&["reflog", "-1", "--format=%gs"])
+            .ends_with("(plan file)")
+    );
+    assert!(stdout(&out).contains("Their messages came from the plan file"));
 
     let bad = TestRepo::demo();
     fs::write(&file, "commit\nOnly a message\n  @ a999\n").unwrap();
@@ -373,6 +385,85 @@ fn plan_file_runs_without_an_editor() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(stderr(&out).contains("unknown atom a999"));
+}
+
+/// D49: without the opt-in, a plan file's messages are refused (nothing is committed), and
+/// `--edit` opens the editor on the plan so the human writes them.
+#[test]
+fn plan_file_messages_need_the_editor_or_the_opt_in() {
+    let repo = TestRepo::demo();
+    let head = repo.run(&["rev-parse", "HEAD"]);
+    let plan_out = repo
+        .carve()
+        .args(["--plan-only", "--no-check"])
+        .output()
+        .unwrap();
+    let file = repo.path().join("../agent-plan.txt");
+    fs::write(&file, with_messages(&stdout(&plan_out))).unwrap();
+    let out = repo
+        .carve()
+        .args(["--no-check", "--plan-file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("--edit"), "{}", stderr(&out));
+    assert_eq!(repo.run(&["rev-parse", "HEAD"]), head, "nothing committed");
+
+    // Filled messages seed the editor only as proposals: saving untouched aborts.
+    let out = repo
+        .carve()
+        .env("GIT_EDITOR", "true")
+        .args(["--no-check", "--edit", "--plan-file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(repo.run(&["rev-parse", "HEAD"]), head, "nothing committed");
+
+    // The agent's way: proposals as comments; the human's editor writes the messages.
+    let proposed = stdout(&plan_out).replace("commit\n", "commit\n# proposed: an agent's idea\n");
+    fs::write(&file, proposed).unwrap();
+    let (_dir, ed) = editor(TYPE_MESSAGES);
+    let out = repo
+        .carve()
+        .env("GIT_EDITOR", &ed)
+        .args(["--no-check", "--edit", "--plan-file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(repo.run(&["rev-list", "--count", "HEAD"]), "4");
+    let subjects = repo.run(&["log", "--format=%s", "-3"]);
+    assert!(!subjects.contains("agent"), "{subjects}");
+    let undo = repo.run(&["rev-parse", "--git-path", "carve/undo.json"]);
+    let undo: serde_json::Value =
+        serde_json::from_slice(&fs::read(repo.path().join(undo.trim())).unwrap()).unwrap();
+    assert_eq!(undo["plan_source"], "plan-file+edit");
+    assert!(
+        !repo
+            .run(&["reflog", "-1", "--format=%gs"])
+            .contains("(plan file)")
+    );
+}
+
+/// D50: `--plan-only --json` carries the buffer `--plan-only` prints, byte for byte.
+#[test]
+fn plan_json_carries_the_buffer() {
+    let repo = TestRepo::demo();
+    let text = repo
+        .carve()
+        .args(["--plan-only", "--no-check"])
+        .output()
+        .unwrap();
+    let json = repo
+        .carve()
+        .args(["--plan-only", "--no-check", "--json"])
+        .output()
+        .unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(doc["version"], 1);
+    assert_eq!(doc["buffer"].as_str().unwrap(), stdout(&text));
 }
 
 #[test]

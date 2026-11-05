@@ -62,7 +62,11 @@ pub struct Verification {
     pub baseline_errors: Option<usize>,
     pub runs: usize,
     pub cached: usize,
+    /// Summed run time of every check run (more than the wall time when runs overlap).
     pub millis: u64,
+    /// Wall time of the whole verification, and the parallel workers it could use (D51).
+    pub wall_ms: u64,
+    pub jobs: usize,
 }
 
 /// D40: what a failing working tree cost, for the buffer and the summary.
@@ -82,28 +86,50 @@ pub fn verify(
     plan: &Plan,
     checker: &mut Checker,
 ) -> Result<(Plan, Verification)> {
+    let started = std::time::Instant::now();
     let mut plan = plan.clone();
     let mut report = Verification {
         check: checker.spec.display.clone(),
+        jobs: checker.jobs,
         ..Verification::default()
     };
     if plan.groups.is_empty() {
         return Ok((plan, report));
     }
-    let mut trees = prefix_trees(repo, &snap.head.tree, changes, &plan.groups)?;
+    let mut trees = prefix_trees(repo, &snap.base.tree, changes, &plan.groups)?;
 
-    // 0. Base first: its errors, if any, may become the baseline (D43).
-    let base = checker.check(&snap.head.tree)?;
+    // 0. Base and final together (D51); the base's errors, if any, may become the baseline
+    // (D43), applied to the final outcome afterwards.
+    // Spare workers in that first round check prefixes ahead of need (step 4 then finds them
+    // cached); no extra round runs before the final's verdict is known.
+    let mut first = vec![
+        snap.base.tree.clone(),
+        trees.last().expect("groups are not empty").clone(),
+    ];
+    first.extend(
+        (0..plan.groups.len() - 1)
+            .filter(|&k| syntax_break(changes, analysis, &plan.groups[..=k]).is_none())
+            .take(checker.jobs.saturating_sub(2))
+            .map(|k| trees[k].clone()),
+    );
+    let mut first = checker.check_many(&first, false)?.into_iter();
+    let base = first.next().flatten().expect("checked");
+    let last_raw = first.next().flatten().expect("checked");
     if !base.passed {
         if let Some(n) = checker.set_baseline(&base) {
             report.baseline_errors = Some(n);
         } else {
-            return Err(head_fails(changes, checker, &base));
+            let what = if snap.base.commit == snap.head.commit {
+                "HEAD"
+            } else {
+                "the base of the range"
+            };
+            return Err(head_fails(changes, checker, &base, what));
         }
     }
 
     // 1. Final: base plus every non-leave atom.
-    let last = checker.check(trees.last().expect("groups are not empty"))?;
+    let last = checker.against_baseline(last_raw);
     if !last.passed {
         let display = checker.spec.display.clone();
         let fail = |tail: &str, why: &str| {
@@ -117,7 +143,7 @@ pub fn verify(
         if !plan.leave.is_empty() {
             let mut all = plan.groups.clone();
             all.push(plan.leave.clone());
-            let whole = prefix_trees(repo, &snap.head.tree, changes, &all)?;
+            let whole = prefix_trees(repo, &snap.base.tree, changes, &all)?;
             let outcome = checker.check(whole.last().expect("non-empty"))?;
             if outcome.passed {
                 // The leftovers were load-bearing (§6.5): put them back.
@@ -171,23 +197,49 @@ pub fn verify(
                 return Err(fail(&failure, "; no group of changes passes on its own"));
             }
         }
-        trees = prefix_trees(repo, &snap.head.tree, changes, &plan.groups)?;
+        trees = prefix_trees(repo, &snap.base.tree, changes, &plan.groups)?;
     }
 
-    // 3. Probe: the check must fail on a deliberately broken changed file (D1).
+    // 3. Probe: the check must fail on a deliberately broken changed file (D1). Its trees
+    // run in the same rounds as the prefixes (D51), which step 4 then finds cached.
     let final_tree = trees.last().expect("non-empty").clone();
-    probe(repo, changes, &plan, &final_tree, checker, &mut report)?;
+    let n = plan.groups.len();
+    let breaks: Vec<Option<String>> = (0..n.saturating_sub(1))
+        .map(|k| syntax_break(changes, analysis, &plan.groups[..=k]))
+        .collect();
+    let ahead: Vec<String> = (0..breaks.len())
+        .filter(|&k| breaks[k].is_none())
+        .map(|k| trees[k].clone())
+        .collect();
+    probe(
+        repo,
+        changes,
+        &plan,
+        &final_tree,
+        checker,
+        &mut report,
+        &ahead,
+    )?;
 
     // 4. Prefixes, in order; drop every failing boundary (D2).
-    let n = plan.groups.len();
     let mut keep = vec![true; n.saturating_sub(1)];
-    for k in 0..n.saturating_sub(1) {
-        if let Some(path) = syntax_break(changes, analysis, &plan.groups[..=k]) {
+    // D51: every prefix that parses, up to `jobs` at once.
+    let wanted: Vec<usize> = (0..breaks.len()).filter(|&k| breaks[k].is_none()).collect();
+    let checked = checker.check_many(
+        &wanted.iter().map(|&k| trees[k].clone()).collect::<Vec<_>>(),
+        false,
+    )?;
+    let mut outcomes: Vec<Option<crate::check::Outcome>> = vec![None; breaks.len()];
+    for (k, outcome) in wanted.into_iter().zip(checked) {
+        outcomes[k] = outcome;
+    }
+    for (k, (broken, outcome)) in breaks.into_iter().zip(outcomes).enumerate() {
+        if let Some(path) = broken {
             keep[k] = false;
             report.dropped.push(Dropped::Syntax { after: k + 1, path });
             continue;
         }
-        let outcome = checker.check(&trees[k])?;
+        let outcome = outcome.expect("checked");
         if !outcome.passed {
             keep[k] = false;
             report.dropped.push(Dropped::CheckFailed {
@@ -216,11 +268,18 @@ pub fn verify(
     report.runs = checker.runs;
     report.cached = checker.hits;
     report.millis = checker.millis;
+    report.wall_ms = started.elapsed().as_millis() as u64;
     Ok((plan, report))
 }
 
-/// HEAD fails the check. When its errors are recognizable, say how many and offer D43.
-fn head_fails(changes: &Changes, checker: &Checker, base: &crate::check::Outcome) -> Error {
+/// The base (HEAD, or the base of a re-carved range) fails the check. When its errors are
+/// recognizable, say how many and offer D43.
+fn head_fails(
+    changes: &Changes,
+    checker: &Checker,
+    base: &crate::check::Outcome,
+    what: &str,
+) -> Error {
     let manifests = changes.files.iter().any(|f| {
         let name = f.path.rsplit(|&b| b == b'/').next().unwrap_or(&f.path);
         name == b"package.json"
@@ -230,13 +289,13 @@ fn head_fails(changes: &Changes, checker: &Checker, base: &crate::check::Outcome
     });
     let note = if manifests {
         "\nnote: your changes touch package.json or a lockfile; the check runs against your \
-         current node_modules, which matches your working tree, not HEAD"
+         current node_modules, which matches your working tree, not the base"
     } else {
         ""
     };
     let hint = match &base.errors {
         Some(errors) if !checker.no_new_errors => format!(
-            "hint: HEAD already has {} error{}. To carve anyway, so that no commit adds a new \
+            "hint: {what} already has {} error{}. To carve anyway, so that no commit adds a new \
              one: git carve --no-new-errors",
             errors.len(),
             if errors.len() == 1 { "" } else { "s" }
@@ -245,7 +304,7 @@ fn head_fails(changes: &Changes, checker: &Checker, base: &crate::check::Outcome
             .to_owned(),
     };
     Error::CheckFailed(format!(
-        "the check fails on HEAD, before any of your changes\ncheck: {}\n{}{note}\n{hint}",
+        "the check fails on {what}, before any of your changes\ncheck: {}\n{}{note}\n{hint}",
         checker.spec.display, base.tail
     ))
 }
@@ -272,7 +331,7 @@ fn rescue(
             if kept.is_empty() {
                 return Ok((false, String::new()));
             }
-            let trees = prefix_trees(repo, &snap.head.tree, changes, &kept)?;
+            let trees = prefix_trees(repo, &snap.base.tree, changes, &kept)?;
             let outcome = checker.check(trees.last().expect("non-empty"))?;
             Ok((outcome.passed, outcome.tail))
         };
@@ -467,6 +526,7 @@ fn probe(
     final_tree: &str,
     checker: &mut Checker,
     report: &mut Verification,
+    ahead: &[String],
 ) -> Result<()> {
     // Config files decide what a check reads; their ids key the remembered verdict.
     let listing = repo.git.run(["ls-tree", "-r", "-z", final_tree])?;
@@ -536,12 +596,14 @@ fn probe(
             *entry = (f, atoms);
         }
     }
+    // (path, key, remembered verdict, or the broken tree to check)
+    let mut found: Vec<(String, String, Option<bool>, Option<String>)> = Vec::new();
     for (dir, (f, _)) in per_dir.into_iter().take(MAX_PROBES) {
         let file = &changes.files[f];
         let path = show(&file.path);
         let key = format!("{configs}|{}", show(&dir).replace('\0', "|"));
-        let (caught, remembered) = match checker.probe_known(&key) {
-            Some(caught) => (caught, true),
+        match checker.probe_known(&key) {
+            Some(caught) => found.push((path, key, Some(caught), None)),
             None => {
                 let new = file
                     .new
@@ -557,14 +619,27 @@ fn probe(
                         bytes: adapter.corrupt(&content),
                     },
                 )])?;
-                let tree = builder.write()?;
-                let caught = !checker.check(&tree)?.passed;
+                found.push((path, key, None, Some(builder.write()?)));
+            }
+        }
+    }
+    // D51: the broken trees, then the prefixes ahead, in shared rounds.
+    let mut trees: Vec<String> = found.iter().filter_map(|f| f.3.clone()).collect();
+    if !trees.is_empty() {
+        trees.extend(ahead.iter().cloned());
+    }
+    let mut outcomes = checker.check_many(&trees, false)?.into_iter();
+    for (path, key, known, _) in found {
+        let (caught, remembered) = match known {
+            Some(caught) => (caught, true),
+            None => {
+                let caught = !outcomes.next().flatten().expect("checked").passed;
                 checker.remember_probe(&key, caught)?;
                 (caught, false)
             }
         };
         report.probes.push(Probe {
-            path: path.clone(),
+            path,
             caught,
             remembered,
         });
@@ -622,23 +697,29 @@ pub fn check_plan(
     if groups.is_empty() {
         return Ok(None);
     }
-    let trees = prefix_trees(repo, &snap.head.tree, changes, groups)?;
+    let trees = prefix_trees(repo, &snap.base.tree, changes, groups)?;
     let n = groups.len();
-    let last = checker.check(&trees[n - 1])?;
-    if !last.passed {
-        return Ok(Some((n, last.tail)));
+    // The final tree, then each prefix up to the first one that would not parse, in that
+    // order and up to `jobs` at once (D51): the first failure in this order is the answer.
+    let parses = (0..n - 1)
+        .find(|&k| syntax_break(changes, analysis, &groups[..=k]).is_some())
+        .unwrap_or(n - 1);
+    let mut order = vec![trees[n - 1].clone()];
+    order.extend(trees[..parses].iter().cloned());
+    let outcomes = checker.check_many(&order, true)?;
+    for (i, outcome) in outcomes.into_iter().enumerate() {
+        match outcome {
+            Some(o) if !o.passed => return Ok(Some((if i == 0 { n } else { i }, o.tail))),
+            Some(_) => {}
+            None => break,
+        }
     }
-    for k in 0..n - 1 {
-        if let Some(path) = syntax_break(changes, analysis, &groups[..=k]) {
-            return Ok(Some((
-                k + 1,
-                format!("{path} would not parse after this commit"),
-            )));
-        }
-        let outcome = checker.check(&trees[k])?;
-        if !outcome.passed {
-            return Ok(Some((k + 1, outcome.tail)));
-        }
+    if parses < n - 1 {
+        let path = syntax_break(changes, analysis, &groups[..=parses]).expect("found above");
+        return Ok(Some((
+            parses + 1,
+            format!("{path} would not parse after this commit"),
+        )));
     }
     Ok(None)
 }

@@ -92,23 +92,65 @@ pub struct RunOptions {
     pub no_new_errors: bool,
 }
 
-pub fn run(manifest: &Manifest, opts: &RunOptions, cache: &Path, env: &Git) -> Result<Results> {
-    // Tier B: which lockfile versions each source installs (D23), decided before any install.
-    let mut allowed = BTreeMap::new();
-    if opts.check {
-        let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
-        for w in &manifest.windows {
-            let git = env.with_dir(clone_dir(cache, &w.source));
-            if let Ok((_, oid, _)) = super::deps::lockfile(&git, &w.base)? {
-                *counts
-                    .entry(w.source.clone())
-                    .or_default()
-                    .entry(oid)
-                    .or_default() += 1;
-            }
+/// Tier B: which lockfile versions each source installs (D23), decided before any install.
+pub(crate) fn tier_b_allowed(
+    manifest: &Manifest,
+    cache: &Path,
+    env: &Git,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut counts: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for w in &manifest.windows {
+        let git = env.with_dir(clone_dir(cache, &w.source));
+        if let Ok((_, oid, _)) = super::deps::lockfile(&git, &w.base)? {
+            *counts
+                .entry(w.source.clone())
+                .or_default()
+                .entry(oid)
+                .or_default() += 1;
         }
-        allowed = super::deps::allowed(&counts);
     }
+    Ok(super::deps::allowed(&counts))
+}
+
+/// Materializes a window in its cache clone; tier B first installs and links the window's
+/// historical dependencies (into the cache only). `Err(reason)` when it cannot be scored.
+pub(crate) fn setup_window(
+    w: &Window,
+    cache: &Path,
+    check: bool,
+    env: &Git,
+    allowed: &BTreeMap<String, Vec<String>>,
+) -> Result<std::result::Result<Git, String>> {
+    let dir = clone_dir(cache, &w.source);
+    let git = env.with_dir(&dir);
+    if check {
+        let (file, oid, manager) = match super::deps::lockfile(&git, &w.base)? {
+            Ok(found) => found,
+            Err(reason) => return Ok(Err(format!("deps: {reason}"))),
+        };
+        if !allowed.get(&w.source).is_some_and(|v| v.contains(&oid)) {
+            return Ok(Err(
+                "deps: lockfile version not among the installed three".into()
+            ));
+        }
+        let modules = match super::deps::install(&git, &w.base, &file, &oid, &manager, cache)? {
+            Ok(modules) => modules,
+            Err(reason) => return Ok(Err(format!("deps: {reason}"))),
+        };
+        materialize(&git, w)?;
+        super::deps::link(&dir, &modules)?;
+    } else {
+        materialize(&git, w)?;
+    }
+    Ok(Ok(git))
+}
+
+pub fn run(manifest: &Manifest, opts: &RunOptions, cache: &Path, env: &Git) -> Result<Results> {
+    let allowed = if opts.check {
+        tier_b_allowed(manifest, cache, env)?
+    } else {
+        BTreeMap::new()
+    };
     let mut scores = Vec::new();
     let total = manifest
         .windows
@@ -216,8 +258,6 @@ fn score_window(
     env: &Git,
     allowed: &BTreeMap<String, Vec<String>>,
 ) -> Result<WindowScore> {
-    let dir = clone_dir(cache, &w.source);
-    let git = env.with_dir(&dir);
     let mut score = WindowScore {
         id: w.id.clone(),
         source: w.source.clone(),
@@ -225,30 +265,13 @@ fn score_window(
         ..WindowScore::default()
     };
     // Tier B: the window's historical dependencies, linked into the cache clone only.
-    if opts.check {
-        let (file, oid, manager) = match super::deps::lockfile(&git, &w.base)? {
-            Ok(found) => found,
-            Err(reason) => {
-                score.skipped = Some(format!("deps: {reason}"));
-                return Ok(score);
-            }
-        };
-        if !allowed.get(&w.source).is_some_and(|v| v.contains(&oid)) {
-            score.skipped = Some("deps: lockfile version not among the installed three".into());
+    let git = match setup_window(w, cache, opts.check, env, allowed)? {
+        Ok(git) => git,
+        Err(reason) => {
+            score.skipped = Some(reason);
             return Ok(score);
         }
-        let modules = match super::deps::install(&git, &w.base, &file, &oid, &manager, cache)? {
-            Ok(modules) => modules,
-            Err(reason) => {
-                score.skipped = Some(format!("deps: {reason}"));
-                return Ok(score);
-            }
-        };
-        materialize(&git, w)?;
-        super::deps::link(&dir, &modules)?;
-    } else {
-        materialize(&git, w)?;
-    }
+    };
     let repo = Repo::discover(git)?;
     let started = Instant::now();
     let prepared = match session::prepare(

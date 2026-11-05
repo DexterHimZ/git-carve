@@ -70,6 +70,8 @@ pub fn undo(repo: &Repo) -> Result<UndoRecord> {
     }
     repo.git.run(["read-tree", &record.old])?;
     repo.git.run(["update-index", "-q", "--refresh"])?;
+    // D48: the stack's layer branches go too, unless they moved since the carve.
+    crate::commit::remove_layers(repo, &record.stack);
     // One level only.
     fs::rename(&path, path.with_extension("json.done"))
         .map_err(io(format!("retire {}", path.display())))?;

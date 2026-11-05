@@ -23,6 +23,10 @@ const DEFAULT_LINKS: &[&str] = &["node_modules", ".venv", "venv", "next-env.d.ts
 const DEFAULT_TIMEOUT_SECS: u64 = 600;
 const TAIL_LINES: usize = 40;
 const CACHE_LIMIT: usize = 5000;
+/// Parallel check workers for a check that can run in parallel, before `carve.checkJobs`
+/// (DECISIONS.md D51), capped by half the CPUs.
+const DEFAULT_JOBS: usize = 2;
+const MAX_JOBS: u64 = 8;
 /// Install markers whose modification time says "dependencies changed" (D13).
 const INSTALL_MARKERS: &[&str] = &[
     ".package-lock.json",
@@ -44,6 +48,10 @@ pub struct CheckSpec {
     /// The file extensions a default check reads (D45); `None` for an explicit check, whose
     /// reach only the probe can tell.
     pub reads: Option<Vec<String>>,
+    /// Safe to run in several worktrees at once without asking (D51): the default TypeScript
+    /// check, whose build info lives next to each worktree. Anything else needs
+    /// `carve.checkJobs` (cargo, for one, locks its shared target directory).
+    pub parallel: bool,
 }
 
 impl CheckSpec {
@@ -77,10 +85,12 @@ pub fn resolve(repo: &Repo, flag: Option<&str>, changed: &[&[u8]]) -> Result<Che
         .iter()
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .collect();
+    let mut parallel = true;
     let check = match primary().default_check(&repo.toplevel, &configs, &changed) {
         Ok(check) => check,
         // No TypeScript project at all: the ecosystem's own check (DECISIONS.md D45).
         Err(_) if configs.is_empty() => {
+            parallel = false;
             match crate::lang::generic::ecosystem_check(&repo.toplevel, &changed) {
                 Some(check) => check,
                 None if changed
@@ -115,6 +125,7 @@ pub fn resolve(repo: &Repo, flag: Option<&str>, changed: &[&[u8]]) -> Result<Che
         explicit: false,
         links: check.links,
         reads: Some(check.reads),
+        parallel,
     })
 }
 
@@ -125,6 +136,7 @@ fn explicit(command: &str) -> CheckSpec {
         explicit: true,
         links: Vec::new(),
         reads: None,
+        parallel: false,
     }
 }
 
@@ -190,12 +202,23 @@ struct CacheFile {
     entries: Vec<(String, Outcome)>,
 }
 
-/// Runs the check on trees, in a scratch worktree kept between runs.
+/// One place a check runs: the scratch worktree (worker 0) or a parallel worker's
+/// `carve/w<k>/scratch` (D51). Each keeps its own warm files, and the default TypeScript
+/// check its own build info (`../tsbuildinfo`, next to the worktree).
+struct Worker {
+    dir: PathBuf,
+    git: Git,
+}
+
+/// Runs the check on trees, in scratch worktrees kept between runs.
 pub struct Checker<'r> {
     repo: &'r Repo,
     pub spec: CheckSpec,
-    scratch: PathBuf,
-    scratch_git: Git,
+    workers: Vec<Worker>,
+    /// How many trees may be checked at once (D51).
+    pub jobs: usize,
+    /// The paths carve may commit, for linking dependency directories into new workers.
+    carved: Vec<Vec<u8>>,
     fingerprint: String,
     timeout: Duration,
     cache: BTreeMap<String, Outcome>,
@@ -217,22 +240,10 @@ impl<'r> Checker<'r> {
     pub fn new(repo: &'r Repo, spec: CheckSpec, carved: &[&[u8]]) -> Result<Self> {
         let carve = repo.ensure_carve_dir()?.to_path_buf();
         let scratch = carve.join("scratch");
-        if !scratch.join(".git").exists() {
-            let _ = fs::remove_dir_all(&scratch);
-            repo.git.run(["worktree", "prune"])?;
-            let path = scratch.to_string_lossy();
-            repo.git.run([
-                "worktree",
-                "add",
-                "--detach",
-                "--no-checkout",
-                "-q",
-                path.as_ref(),
-                "HEAD",
-            ])?;
-        }
+        open_worktree(repo, &scratch)?;
         fs::create_dir_all(carve.join("tsbuildinfo")).map_err(io("create tsbuildinfo dir"))?;
         let links = link(repo, &scratch, carved, &spec.links)?;
+        let jobs = jobs_for(repo, &spec)?;
         let timeout =
             Duration::from_secs(repo.config_u64("carve.checkTimeout", DEFAULT_TIMEOUT_SECS)?);
         let fingerprint = format!(
@@ -246,12 +257,16 @@ impl<'r> Checker<'r> {
                 .join(";")
         );
         let (cache, order) = load_cache(&carve.join("checks.json"));
-        let scratch_git = repo.git.with_dir(&scratch);
+        let worker = Worker {
+            git: repo.git.with_dir(&scratch),
+            dir: scratch,
+        };
         Ok(Self {
             repo,
             spec,
-            scratch,
-            scratch_git,
+            workers: vec![worker],
+            jobs,
+            carved: carved.iter().map(|p| p.to_vec()).collect(),
             fingerprint,
             timeout,
             cache,
@@ -265,38 +280,154 @@ impl<'r> Checker<'r> {
     }
 
     pub fn scratch(&self) -> &Path {
-        &self.scratch
+        &self.workers[0].dir
     }
 
     /// Checks one tree, from the cache when this exact tree, command, and toolchain passed
     /// or failed before. With a baseline (D43), a failure that adds no error beyond HEAD's
     /// passes, and its tail lists only the new errors.
     pub fn check(&mut self, tree: &str) -> Result<Outcome> {
-        let key = format!("{tree}|{}", self.fingerprint);
-        let raw = match self.cache.get(&key) {
-            // A failure cached before errors were recorded cannot set or meet a baseline.
-            Some(hit)
-                if !((self.no_new_errors || self.baseline.is_some())
-                    && !hit.passed
-                    && hit.errors.is_none()) =>
-            {
-                self.hits += 1;
-                Outcome {
-                    cached: true,
-                    ..hit.clone()
+        let mut out = self.check_many(&[tree.to_owned()], false)?;
+        Ok(out.remove(0).expect("one tree, no early stop"))
+    }
+
+    /// Checks trees in order, up to `jobs` at a time in separate worktrees (D51). Cached
+    /// trees cost nothing. With `stop_at_failure`, the first failing tree in order ends the
+    /// run, and every tree after it comes back `None` (unchecked, or checked but not
+    /// reported: a round runs in parallel). Outcomes are exactly what `check` would give one
+    /// by one: each tree's result depends only on the tree.
+    pub fn check_many(
+        &mut self,
+        trees: &[String],
+        stop_at_failure: bool,
+    ) -> Result<Vec<Option<Outcome>>> {
+        let mut out: Vec<Option<Outcome>> = vec![None; trees.len()];
+        let mut next = 0;
+        while next < trees.len() {
+            // The next round: up to `jobs` uncached trees; cached ones are answered here.
+            let mut round: Vec<usize> = Vec::new();
+            while next < trees.len() && round.len() < self.jobs {
+                let i = next;
+                if round.iter().any(|&r| trees[r] == trees[i]) {
+                    break; // a duplicate waits for the round's result in the cache
+                }
+                next += 1;
+                if let Some(hit) = self.hit(&trees[i]) {
+                    let outcome = self.against_baseline(hit);
+                    let failed = !outcome.passed;
+                    out[i] = Some(outcome);
+                    if failed && stop_at_failure {
+                        break;
+                    }
+                } else {
+                    round.push(i);
                 }
             }
-            _ => {
-                // Updates only the files that differ, so incremental checkers stay warm.
-                self.scratch_git.run(["read-tree", "-u", "--reset", tree])?;
-                let outcome = self.run()?;
+            while self.workers.len() < round.len() {
+                self.add_worker()?;
+            }
+            let (command, timeout) = (self.spec.command.as_str(), self.timeout);
+            let target = self.repo.carve_dir.join("target");
+            let results: Vec<Result<Outcome>> = thread::scope(|scope| {
+                let handles: Vec<_> = round
+                    .iter()
+                    .zip(&self.workers)
+                    .map(|(&i, worker)| {
+                        let (tree, target) = (&trees[i], &target);
+                        scope.spawn(move || -> Result<Outcome> {
+                            // Updates only the files that differ, so incremental checkers
+                            // stay warm.
+                            worker.git.run(["read-tree", "-u", "--reset", tree])?;
+                            run_check(command, &worker.dir, timeout, target)
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("check worker panicked"))
+                    .collect()
+            });
+            for (&i, result) in round.iter().zip(results) {
+                let outcome = result?;
                 self.runs += 1;
                 self.millis += outcome.millis;
-                self.store(key, outcome.clone())?;
-                outcome
+                self.store(
+                    format!("{}|{}", trees[i], self.fingerprint),
+                    outcome.clone(),
+                )?;
+                out[i] = Some(self.against_baseline(outcome));
             }
-        };
-        Ok(self.against_baseline(raw))
+            if stop_at_failure {
+                if let Some(f) = out
+                    .iter()
+                    .position(|o| o.as_ref().is_some_and(|o| !o.passed))
+                {
+                    for o in out.iter_mut().skip(f + 1) {
+                        *o = None;
+                    }
+                    return Ok(out);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Runs `tree` once in each of `jobs` workers without caching the outcome, so every
+    /// worker's incremental state starts there: the speed benchmark's steady state, where an
+    /// earlier carve or verify left build info at about HEAD (D51).
+    pub fn warm(&mut self, tree: &str) -> Result<()> {
+        while self.workers.len() < self.jobs {
+            self.add_worker()?;
+        }
+        let (command, timeout) = (self.spec.command.as_str(), self.timeout);
+        let target = self.repo.carve_dir.join("target");
+        thread::scope(|scope| {
+            let handles: Vec<_> = self
+                .workers
+                .iter()
+                .take(self.jobs)
+                .map(|worker| {
+                    let target = &target;
+                    scope.spawn(move || -> Result<Outcome> {
+                        worker.git.run(["read-tree", "-u", "--reset", tree])?;
+                        run_check(command, &worker.dir, timeout, target)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .try_for_each(|h| h.join().expect("check worker panicked").map(drop))
+        })
+    }
+
+    /// A cached outcome for this tree, command, and toolchain.
+    fn hit(&mut self, tree: &str) -> Option<Outcome> {
+        let hit = self.cache.get(&format!("{tree}|{}", self.fingerprint))?;
+        // A failure cached before errors were recorded cannot set or meet a baseline.
+        if (self.no_new_errors || self.baseline.is_some()) && !hit.passed && hit.errors.is_none() {
+            return None;
+        }
+        self.hits += 1;
+        Some(Outcome {
+            cached: true,
+            ..hit.clone()
+        })
+    }
+
+    /// Worker k: `carve/w<k>/scratch`, with its own build-info directory and the same
+    /// dependency links as the scratch worktree.
+    fn add_worker(&mut self) -> Result<()> {
+        let root = self.repo.carve_dir.join(format!("w{}", self.workers.len()));
+        let dir = root.join("scratch");
+        open_worktree(self.repo, &dir)?;
+        fs::create_dir_all(root.join("tsbuildinfo")).map_err(io("create tsbuildinfo dir"))?;
+        let carved: Vec<&[u8]> = self.carved.iter().map(Vec::as_slice).collect();
+        link(self.repo, &dir, &carved, &self.spec.links)?;
+        self.workers.push(Worker {
+            git: self.repo.git.with_dir(&dir),
+            dir,
+        });
+        Ok(())
     }
 
     /// D43: makes HEAD's failing outcome the baseline, when `--no-new-errors` is on and the
@@ -313,7 +444,8 @@ impl<'r> Checker<'r> {
         Some(n)
     }
 
-    fn against_baseline(&self, raw: Outcome) -> Outcome {
+    /// D43: a failure that adds no error beyond the baseline passes. Identity without one.
+    pub fn against_baseline(&self, raw: Outcome) -> Outcome {
         let (Some(baseline), false) = (&self.baseline, raw.passed) else {
             return raw;
         };
@@ -352,85 +484,6 @@ impl<'r> Checker<'r> {
                 ..raw
             }
         }
-    }
-
-    fn run(&self) -> Result<Outcome> {
-        let started = Instant::now();
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg(&self.spec.command)
-            .current_dir(&self.scratch)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env("CARGO_TARGET_DIR", self.repo.carve_dir.join("target"))
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .process_group(0);
-        let mut child = cmd
-            .spawn()
-            .map_err(io(format!("run check `{}`", self.spec.command)))?;
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let readers: Vec<_> = [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn Read + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|mut stream| {
-            let output = Arc::clone(&output);
-            thread::spawn(move || {
-                let mut buf = [0u8; 8192];
-                while let Ok(n) = stream.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    output
-                        .lock()
-                        .expect("output lock")
-                        .extend_from_slice(&buf[..n]);
-                }
-            })
-        })
-        .collect();
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(io("wait for check"))? {
-                break Some(status);
-            }
-            if started.elapsed() >= self.timeout {
-                kill_group(child.id());
-                let _ = child.wait();
-                break None;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        for reader in readers {
-            let _ = reader.join();
-        }
-        let output = String::from_utf8_lossy(&output.lock().expect("output lock")).into_owned();
-        let passed = status.is_some_and(|s| s.success());
-        let errors = if passed { None } else { diagnostics(&output) };
-        let mut tail = if passed { String::new() } else { tail(&output) };
-        if status.is_none() {
-            tail.push_str(&format!(
-                "\n(check timed out after {}s; carve.checkTimeout)",
-                self.timeout.as_secs()
-            ));
-        }
-        Ok(Outcome {
-            passed,
-            tail,
-            millis: started.elapsed().as_millis() as u64,
-            cached: false,
-            errors,
-        })
     }
 
     /// A remembered probe verdict for this toolchain and `config` (D1: probe once per
@@ -479,6 +532,84 @@ impl<'r> Checker<'r> {
     }
 }
 
+/// Runs the check once in `dir` (the process group is killed on timeout).
+fn run_check(command: &str, dir: &Path, timeout: Duration, target: &Path) -> Result<Outcome> {
+    let started = Instant::now();
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("CARGO_TARGET_DIR", target)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .process_group(0);
+    let mut child = cmd.spawn().map_err(io(format!("run check `{command}`")))?;
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let readers: Vec<_> = [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|mut stream| {
+        let output = Arc::clone(&output);
+        thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = stream.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                output
+                    .lock()
+                    .expect("output lock")
+                    .extend_from_slice(&buf[..n]);
+            }
+        })
+    })
+    .collect();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(io("wait for check"))? {
+            break Some(status);
+        }
+        if started.elapsed() >= timeout {
+            kill_group(child.id());
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let output = String::from_utf8_lossy(&output.lock().expect("output lock")).into_owned();
+    let passed = status.is_some_and(|s| s.success());
+    let errors = if passed { None } else { diagnostics(&output) };
+    let mut tail = if passed { String::new() } else { tail(&output) };
+    if status.is_none() {
+        tail.push_str(&format!(
+            "\n(check timed out after {}s; carve.checkTimeout)",
+            timeout.as_secs()
+        ));
+    }
+    Ok(Outcome {
+        passed,
+        tail,
+        millis: started.elapsed().as_millis() as u64,
+        cached: false,
+        errors,
+    })
+}
+
 fn load_cache(path: &Path) -> (BTreeMap<String, Outcome>, Vec<String>) {
     let file: CacheFile = fs::read(path)
         .ok()
@@ -486,6 +617,47 @@ fn load_cache(path: &Path) -> (BTreeMap<String, Outcome>, Vec<String>) {
         .unwrap_or_default();
     let order = file.entries.iter().map(|(k, _)| k.clone()).collect();
     (file.entries.into_iter().collect(), order)
+}
+
+/// The scratch worktree at `dir`, created detached and empty when missing (§8.2).
+fn open_worktree(repo: &Repo, dir: &Path) -> Result<()> {
+    if dir.join(".git").exists() {
+        return Ok(());
+    }
+    let _ = fs::remove_dir_all(dir);
+    repo.git.run(["worktree", "prune"])?;
+    let path = dir.to_string_lossy();
+    repo.git.run([
+        "worktree",
+        "add",
+        "--detach",
+        "--no-checkout",
+        "-q",
+        path.as_ref(),
+        "HEAD",
+    ])?;
+    Ok(())
+}
+
+/// D51: `carve.checkJobs` when set; else `DEFAULT_JOBS` (at most half the CPUs) for a check
+/// that is safe in parallel, and 1 for anything else. `GIT_CARVE_DEV_CHECK_JOBS` overrides
+/// both, for the benchmark.
+fn jobs_for(repo: &Repo, spec: &CheckSpec) -> Result<usize> {
+    if let Some(n) = std::env::var("GIT_CARVE_DEV_CHECK_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Ok(n.clamp(1, MAX_JOBS) as usize);
+    }
+    let cpus = thread::available_parallelism().map_or(1, |n| n.get());
+    let default = if spec.parallel {
+        DEFAULT_JOBS.min(cpus / 2).max(1)
+    } else {
+        1
+    };
+    Ok(repo
+        .config_u64("carve.checkJobs", default as u64)?
+        .clamp(1, MAX_JOBS) as usize)
 }
 
 /// Symlinks dependency directories (and other untracked inputs) into the scratch worktree
@@ -591,6 +763,30 @@ pub fn clean(repo: &Repo) -> Result<Vec<String>> {
             .run(["worktree", "remove", "--force", path.as_ref()]);
         let _ = fs::remove_dir_all(&scratch);
         removed.push("scratch worktree".to_owned());
+    }
+    // D51: the parallel workers' worktrees, `carve/w<k>/`.
+    let mut workers = 0;
+    for entry in fs::read_dir(&repo.carve_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_worker = name
+            .strip_prefix('w')
+            .is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()));
+        if is_worker && entry.path().is_dir() {
+            let dir = entry.path().join("scratch");
+            let path = dir.to_string_lossy();
+            let _ = repo
+                .git
+                .run(["worktree", "remove", "--force", path.as_ref()]);
+            let _ = fs::remove_dir_all(entry.path());
+            workers += 1;
+        }
+    }
+    if workers > 0 {
+        removed.push(format!("{workers} parallel check worktree(s)"));
     }
     repo.git.run(["worktree", "prune"])?;
     for (name, label) in [

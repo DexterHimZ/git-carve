@@ -21,6 +21,15 @@ const BASE_ENV: &[(&str, &str)] = &[
     ("GIT_LITERAL_PATHSPECS", "1"),
 ];
 
+/// Removed from every call's inherited environment (see `output`).
+const REPO_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+];
+
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
     #[error("could not run `git {args}`: {source}")]
@@ -176,9 +185,15 @@ impl Git {
             source,
         };
         let mut cmd = Command::new("git");
-        cmd.args(args)
-            .current_dir(&self.dir)
-            .envs(BASE_ENV.iter().copied())
+        cmd.args(args).current_dir(&self.dir);
+        // Inherited repository variables would redirect every handle to one repository: git
+        // exports GIT_DIR to a pre-push hook in a linked worktree, and the scratch worktrees'
+        // `read-tree -u` would then rewrite the user's index. carve finds the repository from
+        // each handle's directory; a handle that needs one of these sets it explicitly.
+        for var in REPO_ENV {
+            cmd.env_remove(var);
+        }
+        cmd.envs(BASE_ENV.iter().copied())
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

@@ -25,10 +25,18 @@ pub struct Options {
     pub no_check: bool,
     /// `--plan-file`: a filled buffer instead of the editor (DECISIONS.md D6).
     pub plan_file: Option<PathBuf>,
+    /// `--edit` (D49): the editor opens on the plan file, and the human writes the messages.
+    pub edit: bool,
     /// The learned judge deciding soft merges (DECISIONS.md D28); code-only when `None`.
     pub judge: Option<crate::judge::LearnedJudge>,
     /// `--no-new-errors` (D43): when HEAD fails the check, no commit may add a new error.
     pub no_new_errors: bool,
+    /// `git carve <base>` (D46 phase 1): re-carve the commits since this base too.
+    pub base: Option<crate::precondition::ResolvedBase>,
+    /// `--stack` (D48): one branch per commit but the last, on top of the range's base.
+    pub stack: bool,
+    /// Parallel check workers, overriding `carve.checkJobs` (D51; the speed benchmark).
+    pub jobs: Option<usize>,
 }
 
 /// Everything the summary (§10.4) needs.
@@ -41,6 +49,18 @@ pub struct Summary {
     pub merges: usize,
     /// Atoms missing from the buffer, kept in the working tree.
     pub missing: Vec<String>,
+    /// The re-carved range, when there was one.
+    pub range: Option<crate::precondition::ResolvedBase>,
+    /// `--stack`: the current branch and its new layer branches, bottom first.
+    pub stack: Option<StackSummary>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StackSummary {
+    /// The top layer: the branch carve committed on.
+    pub branch: String,
+    /// `(branch, commit, subject)` for layers 1..N-1.
+    pub layers: Vec<(String, String, String)>,
 }
 
 /// Plans and verifies (the `--plan-only` part of a run).
@@ -51,13 +71,29 @@ pub struct Prepared<'r> {
     pub plan: Plan,
     pub verification: Option<Verification>,
     pub checker: Option<Checker<'r>>,
+    /// Range carves only: where each atom's lines came from (display only).
+    pub sources: crate::attribution::Sources,
+}
+
+/// `carve.agentMessages` (D49): an agent may write the message lines of a plan file.
+fn agent_messages(repo: &Repo) -> Result<bool> {
+    Ok(repo
+        .git
+        .try_run_str(["config", "--type=bool", "carve.agentMessages"])?
+        .is_some_and(|v| v.trim() == "true"))
 }
 
 pub fn prepare<'r>(repo: &'r Repo, opts: &Options) -> Result<Prepared<'r>> {
     precondition::check_state(repo)?;
-    let snap = snapshot::take(repo)?;
+    let base = opts
+        .base
+        .as_ref()
+        .filter(|b| !b.commits.is_empty())
+        .map(|b| b.oid.as_str());
+    let snap = snapshot::take_since(repo, base)?;
     let changes = atomize(repo, &snap)?;
     precondition::check_size(repo, &changes)?;
+    let sources = crate::attribution::attribute(repo, &snap, &changes)?;
     let analysis = facts::analyze(repo, &changes)?;
     let plan = graph::plan_with(&changes, &analysis, opts.judge.as_ref());
     if opts.no_check {
@@ -68,12 +104,16 @@ pub fn prepare<'r>(repo: &'r Repo, opts: &Options) -> Result<Prepared<'r>> {
             plan,
             verification: None,
             checker: None,
+            sources,
         });
     }
     let carved: Vec<&[u8]> = changes.files.iter().map(|f| f.path.as_slice()).collect();
     let spec = check::resolve(repo, opts.check.as_deref(), &carved)?;
     let mut checker = Checker::new(repo, spec, &carved)?;
     checker.no_new_errors = opts.no_new_errors;
+    if let Some(jobs) = opts.jobs {
+        checker.jobs = jobs.max(1);
+    }
     let (plan, verification) =
         verify::verify(repo, &snap, &changes, &analysis, &plan, &mut checker)?;
     Ok(Prepared {
@@ -83,17 +123,45 @@ pub fn prepare<'r>(repo: &'r Repo, opts: &Options) -> Result<Prepared<'r>> {
         plan,
         verification: Some(verification),
         checker: Some(checker),
+        sources,
     })
 }
 
 /// A full run: the plan buffer, then commits.
 pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
+    let stack_branch = if opts.stack {
+        let head = repo
+            .git
+            .try_run_str(["symbolic-ref", "-q", "--short", "HEAD"])?;
+        Some(head.ok_or_else(|| {
+            crate::error::precondition(
+                "a stack needs a branch, and HEAD is detached",
+                Some("`git switch -c <name>` names it"),
+            )
+        })?)
+    } else {
+        None
+    };
     let mut prepared = prepare(repo, opts)?;
     if prepared.plan.groups.is_empty() {
         return Err(Error::Aborted(
             "every change is left out (large or binary new files, debug lines); nothing to commit"
                 .into(),
         ));
+    }
+    if let Some(branch) = &stack_branch {
+        let left = crate::stack::existing_layers(repo, branch, prepared.plan.groups.len())?;
+        if !left.is_empty() {
+            return Err(crate::error::precondition(
+                format!(
+                    "branches from an earlier --stack exist: {}",
+                    left.join(", ")
+                ),
+                Some(
+                    "after review, change layers with `gh stack modify` or `gh stack rebase`; to re-carve from scratch, delete them with `git branch -D`",
+                ),
+            ));
+        }
     }
     let saved_path = repo.carve_dir.join("PLAN.saved");
     let saved: Saved = fs::read(&saved_path)
@@ -102,7 +170,7 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
         .unwrap_or_default();
     let (messages, notes) = plan::restore(&saved, &prepared.changes, &prepared.plan.groups);
     let diff_lines = repo.config_u64("carve.planDiff", plan::DIFF_TOTAL_DEFAULT as u64)? as usize;
-    let mut text = plan::render(
+    let mut text = plan::render_range(
         &prepared.changes,
         &prepared.analysis,
         &prepared.plan,
@@ -113,14 +181,37 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             diff_lines,
             unsure: true,
         },
+        opts.base
+            .as_ref()
+            .map(|base| plan::RangeView {
+                base,
+                sources: &prepared.sources,
+            })
+            .as_ref(),
     );
     let verified_structure = (prepared.plan.groups.clone(), prepared.plan.leave.clone());
 
     let buffer = repo.carve_dir.join("PLAN");
+    // D49: a plan file seeds the editor with --edit; without it, the file is the plan, and
+    // its messages are an agent's unless the human runs the editor.
+    let from_file = opts.plan_file.as_ref().filter(|_| !opts.edit);
+    if let (Some(path), true) = (&opts.plan_file, opts.edit) {
+        text = fs::read_to_string(path).map_err(io(format!("read {}", path.display())))?;
+        // Messages already in the file are shown as proposals, so saving untouched (or an
+        // editor like `true`) cannot turn them into commits (D49 review).
+        if !agent_messages(repo)? {
+            text = plan::messages_as_proposals(&text);
+        }
+    }
+    let plan_source = match (&opts.plan_file, opts.edit) {
+        (None, _) => "editor",
+        (Some(_), true) => "plan-file+edit",
+        (Some(_), false) => "plan-file",
+    };
     let mut attempt = 0;
     let edited = loop {
         attempt += 1;
-        text = match &opts.plan_file {
+        text = match from_file {
             Some(path) => {
                 fs::read_to_string(path).map_err(io(format!("read {}", path.display())))?
             }
@@ -143,6 +234,19 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             }
             Parsed::Errors(errors) => errors.iter().map(|e| format!("# ERROR: {e}")).collect(),
             Parsed::Plan(edited) => {
+                if from_file.is_some()
+                    && edited.groups.iter().any(|g| !g.message.trim().is_empty())
+                    && !agent_messages(repo)?
+                {
+                    return Err(crate::error::precondition(
+                        "the plan file has commit messages in it, and carve takes messages only from \
+                         its editor (DECISIONS.md D49)",
+                        Some(
+                            "review it and write them yourself: add --edit. To let agents write \
+                             messages in this repository: git config carve.agentMessages true",
+                        ),
+                    ));
+                }
                 let (groups, _) = edited.structure();
                 let regrouped = edited.structure() != verified_structure;
                 let failure = match (&mut prepared.checker, regrouped) {
@@ -159,7 +263,7 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
                 match failure {
                     None => break edited,
                     Some((k, tail)) => {
-                        if opts.plan_file.is_some() {
+                        if from_file.is_some() {
                             return Err(Error::CheckFailed(format!(
                                 "commit {k} of the plan file does not pass the check; nothing was committed\n{tail}"
                             )));
@@ -184,7 +288,7 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
                 }
             }
         };
-        if opts.plan_file.is_some() {
+        if from_file.is_some() {
             return Err(Error::Invalid(
                 notes.join("\n").replace("# ERROR: ", "plan file: "),
             ));
@@ -210,25 +314,66 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             message: g.message.clone(),
         })
         .collect();
-    let record = match commit::commit(
+    let subjects: Vec<String> = edited
+        .groups
+        .iter()
+        .map(|g| g.message.lines().next().unwrap_or("").to_owned())
+        .collect();
+    let layers = match &stack_branch {
+        Some(branch) => {
+            let names = crate::stack::layer_names(branch, &subjects);
+            for name in &names {
+                let valid = repo.git.test(["check-ref-format", "--branch", name])?;
+                let taken =
+                    repo.git
+                        .test(["show-ref", "--verify", "-q", &format!("refs/heads/{name}")])?;
+                if !valid || taken {
+                    let why = if taken {
+                        "already exists"
+                    } else {
+                        "is not a valid branch name"
+                    };
+                    return Err(keep_messages(
+                        repo,
+                        &text,
+                        &prepared.changes,
+                        Error::Invalid(format!(
+                            "stack branch {name} {why}; nothing was committed (your messages are kept)"
+                        )),
+                    ));
+                }
+            }
+            names
+        }
+        None => Vec::new(),
+    };
+    let record = match commit::commit_stacked(
         repo,
         &prepared.snap,
         &prepared.changes,
         &groups,
         &Hooks::default(),
+        &layers,
+        Some(plan_source),
     ) {
         Ok(record) => record,
         Err(err) => return Err(keep_messages(repo, &text, &prepared.changes, err)),
     };
     let _ = fs::remove_file(&saved_path);
     let _ = fs::remove_file(&buffer);
+    let stack = stack_branch.map(|branch| StackSummary {
+        branch,
+        layers: layers
+            .iter()
+            .zip(&record.commits)
+            .zip(&subjects)
+            .map(|((name, oid), subject)| (name.clone(), oid.clone(), subject.clone()))
+            .collect(),
+    });
     Ok(Summary {
         record,
-        subjects: edited
-            .groups
-            .iter()
-            .map(|g| g.message.lines().next().unwrap_or("").to_owned())
-            .collect(),
+        stack,
+        subjects,
         merges: prepared
             .verification
             .as_ref()
@@ -239,6 +384,7 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             .iter()
             .map(|&id: &AtomId| prepared.changes.position(id))
             .collect(),
+        range: opts.base.clone().filter(|b| !b.commits.is_empty()),
     })
 }
 

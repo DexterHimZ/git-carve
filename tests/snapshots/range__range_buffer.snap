@@ -1,0 +1,59 @@
+---
+source: tests/range.rs
+expression: out_str(&out)
+---
+# git carve: 4 commits, 2 hunks left out. These commits are NOT verified (--no-check).
+#
+# Re-carving 3 commits since 87dae0c, plus any uncommitted changes.
+# Their old messages, for reference only (nothing is copied into a commit):
+#   193d61e wip
+#   a241f5e asdf
+#   48b7ae9 fix stuff
+#
+# Write a message under each "commit" line (first line = subject).
+# Move "@" lines between blocks to regroup. Reorder blocks to reorder commits.
+# Delete a "commit" line to merge its block into the block above.
+# "@" lines under "leave" stay in your working tree, uncommitted.
+# Lines starting with '#' are ignored. Any commit with an empty message aborts everything.
+# If you change grouping or order, the check re-runs before anything is committed.
+
+commit
+
+
+  @ a1   CHANGELOG.md                     [new file]
+# from: uncommitted (file)
+
+commit
+
+
+  @ a2   src/format.ts:1                  +1 -1  formatBytes  [new]
+  @ a3   src/main.ts:2                    +1 -1
+  @ a5   src/main.ts:10                   +1 -1  main
+  @ a10  src/progress.ts:1                +1 -1
+  @ a11  src/progress.ts:4                +1 -1  progressText
+  @ a12  src/report.ts:1                  +1 -1
+  @ a13  src/report.ts:4                  +1 -1  describeUpload
+  @ a14  src/summary.ts:1                 +1 -1
+  @ a15  src/summary.ts:4                 +1 -1  summaryLine
+  @ a16  src/table.ts:1                   +1 -1
+  @ a17  src/table.ts:4                   +1 -1  sizeCell
+# from: 193d61e wip (5 lines), 48b7ae9 fix stuff (6 lines)
+
+commit
+
+
+  @ a6   src/net.ts:11                    +1 -1  fetchAll
+  @ a8   src/net.ts:16-28                 +13 -0  retryWithBackoff  [new]
+  @ a18  tests/net.test.ts:1              +1 -1
+  @ a19  tests/net.test.ts:7-16           +10 -0  testRetryWithBackoff  [new]
+# from: a241f5e asdf (25 lines)
+
+commit
+
+
+  @ a9   src/parse.ts:8                   +1 -1  parseHeader
+# from: a241f5e asdf (1 line)
+
+leave
+  @ a4   src/main.ts:6                    +1 -0  main  [debug-only line]
+  @ a7   src/net.ts:13                    +1 -0  fetchAll  [debug-only line]

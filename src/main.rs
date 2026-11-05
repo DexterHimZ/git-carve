@@ -39,6 +39,9 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
     if let Some(Command::Eval(cmd)) = &cli.command {
         return run_eval(cmd);
     }
+    if let Some(Command::Hooks(cmd)) = &cli.command {
+        return run_hooks(cmd);
+    }
     let repo = Repo::discover(Git::new(std::env::current_dir()?))?;
     let _lock = repo.lock()?;
     if let Some(Command::Verify(args)) = &cli.command {
@@ -47,6 +50,20 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
 
     if cli.run.undo {
         let record = undo::undo(&repo)?;
+        let mut pushed = Vec::new();
+        for s in &record.stack {
+            let name = s.ref_name.trim_start_matches("refs/heads/");
+            if repo.git.test(["show-ref", "--verify", "-q", &s.ref_name])? {
+                println!("Kept {name}: it moved since the carve.");
+            }
+            pushed.extend(git_carve::stack::on_remotes(&repo, name)?);
+        }
+        if !pushed.is_empty() {
+            println!(
+                "note: {} still exist on the remote, with any pull requests; carve never touches remotes.",
+                pushed.join(", ")
+            );
+        }
         println!(
             "Undid {} commit(s): {} is back at {}. Your working tree was not touched.",
             record.commits.len(),
@@ -65,12 +82,40 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
         return Ok(Exit::Success);
     }
 
+    let base = match &cli.run.base {
+        Some(expr) => {
+            let base = git_carve::precondition::resolve_base(&repo, expr, cli.run.rewrite_pushed)?;
+            if base.merge_based {
+                eprintln!(
+                    "note: {expr} is not an ancestor of HEAD; carving since {}, their merge-base",
+                    &base.oid[..12]
+                );
+            }
+            Some(base)
+        }
+        None => None,
+    };
+    let stack_base = cli.run.base.clone();
+    // D48 --submit preflight: everything it needs, checked locally before any planning.
+    let submit = if cli.run.submit {
+        Some(submit_preflight(
+            &repo,
+            cli.run.base.as_deref().unwrap_or(""),
+            base.as_ref(),
+        )?)
+    } else {
+        None
+    };
     let opts = Options {
+        base,
+        stack: cli.run.stack,
         check: cli.run.check.clone(),
         no_check: cli.run.no_check,
         plan_file: cli.run.plan_file.clone(),
+        edit: cli.run.edit,
         judge: cli.run.judge.then(git_carve::judge::LearnedJudge::builtin),
         no_new_errors: cli.run.no_new_errors,
+        jobs: None,
     };
     if let Some(judge) = opts.judge.as_ref().filter(|_| cli.run.verbose) {
         eprintln!("judge: {} (built in; {})", judge.name, judge.config());
@@ -82,43 +127,62 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
                 eprintln!("check: {}", checker.spec.command);
             }
         }
+        let messages = vec![None; prepared.plan.groups.len()];
+        let buffer = plan::render_range(
+            &prepared.changes,
+            &prepared.analysis,
+            &prepared.plan,
+            &RenderOptions {
+                verification: prepared.verification.as_ref(),
+                messages: &messages,
+                notes: &[],
+                diff_lines: if cli.run.verbose {
+                    plan::DIFF_TOTAL_DEFAULT
+                } else {
+                    0
+                },
+                unsure: true,
+            },
+            opts.base
+                .as_ref()
+                .map(|base| plan::RangeView {
+                    base,
+                    sources: &prepared.sources,
+                })
+                .as_ref(),
+        );
         if cli.run.json {
-            print!(
-                "{}",
-                report::json(
-                    &prepared.changes,
-                    &prepared.analysis,
-                    &prepared.plan,
-                    prepared.verification.as_ref()
-                )
+            let json = report::json_range(
+                &prepared.changes,
+                &prepared.analysis,
+                &prepared.plan,
+                prepared.verification.as_ref(),
+                opts.base.as_ref(),
+                &prepared.sources,
+                Some(&buffer),
             );
+            if cli.run.stack {
+                print!(
+                    "{}",
+                    with_planned_stack(
+                        &repo,
+                        &json,
+                        &stack_base,
+                        opts.base.as_ref(),
+                        prepared.plan.groups.len()
+                    )?
+                );
+            } else {
+                print!("{json}");
+            }
         } else {
-            let messages = vec![None; prepared.plan.groups.len()];
-            print!(
-                "{}",
-                plan::render(
-                    &prepared.changes,
-                    &prepared.analysis,
-                    &prepared.plan,
-                    &RenderOptions {
-                        verification: prepared.verification.as_ref(),
-                        messages: &messages,
-                        notes: &[],
-                        diff_lines: if cli.run.verbose {
-                            plan::DIFF_TOTAL_DEFAULT
-                        } else {
-                            0
-                        },
-                        unsure: true,
-                    },
-                )
-            );
+            print!("{buffer}");
             if let Some(v) = &prepared.verification {
                 eprintln!(
                     "({} check runs, {} cached, {:.1}s)",
                     v.runs,
                     v.cached,
-                    v.millis as f64 / 1000.0
+                    v.wall_ms as f64 / 1000.0
                 );
             }
         }
@@ -126,8 +190,318 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
     }
 
     let summary = session::run(&repo, &opts)?;
+    if cli.run.json {
+        return run_report(
+            &repo,
+            &summary,
+            stack_base.as_deref().unwrap_or(""),
+            submit.as_ref(),
+        );
+    }
     print_summary(&summary);
+    if let Some(stack) = &summary.stack {
+        print_stack(
+            &repo,
+            &summary,
+            stack,
+            stack_base.as_deref().unwrap_or(""),
+            cli.run.verbose,
+            submit.is_some(),
+        )?;
+        if let Some((trunk, _remote)) = &submit {
+            return Ok(submit_stack(stack, trunk, false).0);
+        }
+    }
     Ok(Exit::Success)
+}
+
+/// D48 `--submit` preflight, local only (no network): `gh` with the gh-stack extension, a
+/// remote, and a known trunk. Returns (trunk, remote).
+fn submit_preflight(
+    repo: &Repo,
+    base_expr: &str,
+    base: Option<&git_carve::precondition::ResolvedBase>,
+) -> anyhow::Result<(String, String)> {
+    use git_carve::error::precondition;
+    use git_carve::stack::{self, Tool};
+    if stack::detect_tool() != Tool::GhStack {
+        return Err(precondition(
+            "--submit needs the GitHub CLI with the gh-stack extension",
+            Some("`gh extension install github/gh-stack` (needs gh 2.90+), or drop --submit and run the printed commands"),
+        )
+        .into());
+    }
+    let remote = stack::remote_name(repo)?.ok_or_else(|| {
+        precondition(
+            "--submit needs a remote to push the stack to",
+            Some("`git remote add origin <url>`"),
+        )
+    })?;
+    let current = repo
+        .git
+        .try_run_str(["symbolic-ref", "-q", "--short", "HEAD"])?
+        .unwrap_or_default();
+    let oid = base.map_or("", |b| b.oid.as_str());
+    let trunk = stack::trunk_name(repo, base_expr, oid, &current)?.ok_or_else(|| {
+        precondition(
+            format!("cannot tell which branch the stack goes on from `{base_expr}`"),
+            Some("name the base branch, for example `git carve main --stack --submit`"),
+        )
+    })?;
+    Ok((trunk, remote))
+}
+
+/// D48: runs `gh stack init` then `gh stack submit --auto`. carve passes no PR text: each
+/// layer is one commit, so gh titles each PR with the human's subject. Exit 6 on failure.
+/// `quiet` (`--json`) sends gh's output to stderr so stdout carries only the report.
+fn submit_stack(
+    stack: &git_carve::session::StackSummary,
+    trunk: &str,
+    quiet: bool,
+) -> (Exit, Vec<String>) {
+    let mut branches: Vec<String> = stack.layers.iter().map(|(b, _, _)| b.clone()).collect();
+    branches.push(stack.branch.clone());
+    let mut init: Vec<String> = vec![
+        "stack".into(),
+        "init".into(),
+        "--base".into(),
+        trunk.to_owned(),
+    ];
+    init.extend(branches.iter().cloned());
+    let submit: Vec<String> = vec!["stack".into(), "submit".into(), "--auto".into()];
+    let commands = vec![
+        format!("gh {}", init.join(" ")),
+        format!("gh {}", submit.join(" ")),
+    ];
+    for args in [&init, &submit] {
+        let mut cmd = std::process::Command::new("gh");
+        cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+        let ok = if quiet {
+            match cmd.output() {
+                Ok(out) => {
+                    eprint!(
+                        "{}{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    out.status.success()
+                }
+                Err(_) => false,
+            }
+        } else {
+            println!("Running: gh {}", args.join(" "));
+            cmd.status().is_ok_and(|s| s.success())
+        };
+        if !ok {
+            eprintln!(
+                "git carve: submitting the stack failed; your commits and layer branches are complete"
+            );
+            eprintln!(
+                "retry (safe to repeat):\n  {}\n  {}",
+                commands[0], commands[1]
+            );
+            return (Exit::SubmitFailed, commands);
+        }
+    }
+    if !quiet {
+        println!(
+            "Submitted: {} draft PRs, one per layer (`gh stack submit --open` marks them ready).",
+            branches.len()
+        );
+    }
+    (Exit::Success, commands)
+}
+
+/// `--plan-only --json --stack` (D48): the planned layers. Their branch names take the
+/// subjects typed in the editor, so only each layer's name prefix is known here.
+fn with_planned_stack(
+    repo: &Repo,
+    json: &str,
+    base_expr: &Option<String>,
+    base: Option<&git_carve::precondition::ResolvedBase>,
+    commits: usize,
+) -> anyhow::Result<String> {
+    use git_carve::stack;
+    let mut doc: serde_json::Value = serde_json::from_str(json)?;
+    let branch = repo
+        .git
+        .try_run_str(["symbolic-ref", "-q", "--short", "HEAD"])?;
+    let planned = match &branch {
+        None => serde_json::Value::Null,
+        Some(branch) => {
+            let oid = base.map_or("", |b| b.oid.as_str());
+            let trunk = stack::trunk_name(repo, base_expr.as_deref().unwrap_or(""), oid, branch)?;
+            let layers: Vec<serde_json::Value> = (1..commits)
+                .map(|k| serde_json::json!({"k": k, "prefix": format!("{branch}-{k}")}))
+                .chain(std::iter::once(
+                    serde_json::json!({"k": commits, "branch": branch, "top": true}),
+                ))
+                .collect();
+            serde_json::json!({
+                "trunk": trunk,
+                "remote": stack::remote_name(repo)?,
+                "tool": stack::detect_tool(),
+                "layers": layers,
+            })
+        }
+    };
+    doc["stack"] = planned;
+    Ok(serde_json::to_string_pretty(&doc)? + "\n")
+}
+
+/// `--json` on a full run (D48): what was created, as a report agents can rely on.
+fn run_report(
+    repo: &Repo,
+    s: &Summary,
+    base_expr: &str,
+    submit: Option<&(String, String)>,
+) -> anyhow::Result<Exit> {
+    use git_carve::stack;
+    use serde_json::json;
+    let commits: Vec<serde_json::Value> = s
+        .record
+        .commits
+        .iter()
+        .zip(&s.subjects)
+        .map(|(oid, subject)| json!({"oid": oid, "subject": subject}))
+        .collect();
+    let mut exit = Exit::Success;
+    let stack = match &s.stack {
+        None => serde_json::Value::Null,
+        Some(st) => {
+            let base_oid = s.range.as_ref().map_or("", |r| r.oid.as_str());
+            let trunk = stack::trunk_name(repo, base_expr, base_oid, &st.branch)?;
+            let remote = stack::remote_name(repo)?;
+            let tool = stack::detect_tool();
+            let mut branches: Vec<String> = st.layers.iter().map(|(b, _, _)| b.clone()).collect();
+            branches.push(st.branch.clone());
+            let mut layers: Vec<serde_json::Value> = st
+                .layers
+                .iter()
+                .enumerate()
+                .map(|(k, (b, oid, subject))| {
+                    json!({"k": k + 1, "branch": b, "oid": oid, "subject": subject})
+                })
+                .collect();
+            layers.push(json!({
+                "k": branches.len(),
+                "branch": st.branch,
+                "oid": s.record.new,
+                "subject": s.subjects.last(),
+                "top": true,
+            }));
+            let submitted = match submit {
+                Some((trunk, _)) => {
+                    let (code, commands) = submit_stack(st, trunk, true);
+                    exit = code;
+                    json!({"ran": true, "ok": code == Exit::Success, "commands": commands})
+                }
+                None => json!({
+                    "ran": false,
+                    "ok": null,
+                    "commands": stack::commands(tool, trunk.as_deref(), remote.as_deref(), &branches),
+                }),
+            };
+            json!({
+                "trunk": trunk,
+                "remote": remote,
+                "tool": tool,
+                "layers": layers,
+                "submit": submitted,
+            })
+        }
+    };
+    let report = json!({
+        "version": 1,
+        "branch": s.record.ref_name.trim_start_matches("refs/heads/"),
+        "commits": commits,
+        "left": s.record.left,
+        "verified": s.verification.as_ref().map(|v| v.check.clone()),
+        "range": s.range.as_ref().map(|r| json!({"base": r.oid, "commits": r.commits.len()})),
+        "stack": stack,
+        "undo": "git carve --undo",
+    });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(exit)
+}
+
+/// D48: the stack's layers and how to submit them (nothing is pushed here).
+fn print_stack(
+    repo: &Repo,
+    s: &Summary,
+    stack: &git_carve::session::StackSummary,
+    base_expr: &str,
+    verbose: bool,
+    submitting: bool,
+) -> anyhow::Result<()> {
+    use git_carve::stack::{self, Tool};
+    let base_oid = s.range.as_ref().map_or("", |r| r.oid.as_str());
+    let trunk = stack::trunk_name(repo, base_expr, base_oid, &stack.branch)?;
+    let remote = stack::remote_name(repo)?;
+    let mut branches: Vec<String> = stack.layers.iter().map(|(b, _, _)| b.clone()).collect();
+    branches.push(stack.branch.clone());
+    let checked = match &s.verification {
+        Some(v) => format!("each passed `{}`", v.check),
+        None => "NOT verified (--no-check)".to_owned(),
+    };
+    println!(
+        "Stack on {} ({} layers, {checked}):",
+        trunk.as_deref().unwrap_or("<trunk>"),
+        branches.len()
+    );
+    let width = branches.iter().map(String::len).max().unwrap_or(0);
+    let mut replaces = Vec::new();
+    for (b, oid, subject) in &stack.layers {
+        println!("  {b:width$}  {}  {subject}", &oid[..7]);
+        replaces.extend(stack::on_remotes(repo, b)?);
+    }
+    let top = s.record.commits.last().map_or("", |c| &c[..7]);
+    let top_subject = s.subjects.last().map_or("", String::as_str);
+    println!("  {:width$}  {top}  {top_subject}   (top)", stack.branch);
+    if let Some(upstream) =
+        repo.git
+            .try_run_str(["rev-parse", "-q", "--verify", "--abbrev-ref", "@{u}"])?
+    {
+        let up_oid = repo.git.run_str(["rev-parse", "@{u}"])?;
+        if !repo
+            .git
+            .test(["merge-base", "--is-ancestor", &up_oid, &s.record.new])?
+        {
+            println!(
+                "note: {} diverged from {upstream}; submitting force-pushes it (with --force-with-lease)",
+                stack.branch
+            );
+        }
+    }
+    if !replaces.is_empty() {
+        println!(
+            "note: {} already exist; pushing the new layers replaces them",
+            replaces.join(", ")
+        );
+    }
+    if submitting {
+        return Ok(());
+    }
+    let tool = stack::detect_tool();
+    let tools: &[Tool] = if verbose {
+        &[Tool::GhStack, Tool::Plain]
+    } else {
+        std::slice::from_ref(&tool)
+    };
+    for &t in tools {
+        let label = match t {
+            Tool::GhStack => "To submit with gh stack (nothing was pushed):",
+            Tool::Plain => "To open the PRs without gh stack (nothing was pushed):",
+        };
+        println!("{label}");
+        if trunk.is_none() {
+            println!("  # replace <trunk> with the branch the stack goes on");
+        }
+        for c in stack::commands(t, trunk.as_deref(), remote.as_deref(), &branches) {
+            println!("  {c}");
+        }
+    }
+    Ok(())
 }
 
 /// SPEC §10.4. Subjects are the user's own first lines.
@@ -142,6 +516,14 @@ fn print_summary(s: &Summary) {
             .to_owned()
     };
     let plural = if n == 1 { "" } else { "s" };
+    if let Some(range) = &s.range {
+        let k = range.commits.len();
+        println!(
+            "Re-carved {k} commit{} since {} into {n}.",
+            if k == 1 { "" } else { "s" },
+            &range.oid[..7]
+        );
+    }
     match &s.verification {
         Some(v) => {
             let runs = match v.cached {
@@ -150,7 +532,12 @@ fn print_summary(s: &Summary) {
             };
             let passed = match v.baseline_errors {
                 Some(e) => format!(
-                    "each adds no error beyond the {e} HEAD already had under `{}`",
+                    "each adds no error beyond the {e} {} already had under `{}`",
+                    if s.range.is_some() {
+                        "the base"
+                    } else {
+                        "HEAD"
+                    },
                     v.check
                 ),
                 None => format!("each passed `{}`", v.check),
@@ -159,7 +546,7 @@ fn print_summary(s: &Summary) {
                 "Created {n} commit{plural} on {place}, {passed} ({runs}, {} merge{}, {:.1}s):",
                 s.merges,
                 if s.merges == 1 { "" } else { "s" },
-                v.millis as f64 / 1000.0
+                v.wall_ms as f64 / 1000.0
             )
         }
         None => {
@@ -168,6 +555,9 @@ fn print_summary(s: &Summary) {
     }
     for (oid, subject) in s.record.commits.iter().zip(&s.subjects) {
         println!("  {} {subject}", &oid[..7]);
+    }
+    if s.record.plan_source.as_deref() == Some("plan-file") {
+        println!("Their messages came from the plan file, not the editor (carve.agentMessages).");
     }
     if !s.record.left.is_empty() {
         let hunks = s.record.left.len();
@@ -195,6 +585,57 @@ fn print_summary(s: &Summary) {
     println!("Undo: git carve --undo");
 }
 
+/// D50: `git carve hooks …`. `run` never needs a repository: it fails open.
+fn run_hooks(cmd: &git_carve::cli::HooksCommand) -> anyhow::Result<Exit> {
+    use git_carve::cli::HooksCommand;
+    use git_carve::gate;
+    use std::io::{Read, Write};
+    match cmd {
+        HooksCommand::Run { agent } => {
+            let agent = gate::Agent::parse(agent).expect("clap checked the name");
+            let mut stdin = String::new();
+            std::io::stdin().read_to_string(&mut stdin)?;
+            let verdict = match gate::parse_event(agent, &stdin) {
+                Some(event) => gate::decide(&event, &Git::new(".")),
+                None => gate::Verdict::Allow,
+            };
+            let (out, err, code) = gate::respond(agent, &verdict);
+            print!("{out}");
+            eprint!("{err}");
+            std::io::stdout().flush()?;
+            std::process::exit(code);
+        }
+        HooksCommand::Print { target } => {
+            print!(
+                "{}",
+                gate::snippet(target).expect("clap checked the target")
+            );
+            Ok(Exit::Success)
+        }
+        HooksCommand::Install | HooksCommand::Uninstall => {
+            let repo = Repo::discover(Git::new(std::env::current_dir()?))?;
+            if matches!(cmd, HooksCommand::Install) {
+                match gate::install(&repo)? {
+                    gate::Installed::Written(path) => println!(
+                        "Installed {}: every push now checks its commits first (git carve verify --pre-push).",
+                        path.display()
+                    ),
+                    gate::Installed::Already(path) => {
+                        println!("Already installed: {}", path.display())
+                    }
+                }
+                println!("For agents: git carve hooks print claude|cursor|codex");
+            } else {
+                match gate::uninstall(&repo)? {
+                    Some(path) => println!("Removed {}.", path.display()),
+                    None => println!("No git carve pre-push hook to remove."),
+                }
+            }
+            Ok(Exit::Success)
+        }
+    }
+}
+
 fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<Exit> {
     use git_carve::branch::{self, VerifyOptions};
     use std::io::Read;
@@ -202,7 +643,11 @@ fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<
     let ranges = if args.pre_push {
         let mut stdin = String::new();
         std::io::stdin().read_to_string(&mut stdin)?;
-        branch::pre_push_ranges(&stdin, &repo.format.null_oid())
+        branch::pre_push_ranges(&stdin, &repo.format.null_oid(), |oid| {
+            repo.git
+                .test(["cat-file", "-e", &format!("{oid}^{{commit}}")])
+                .unwrap_or(false)
+        })
     } else if args.range.is_empty() {
         branch::default_ranges(repo)?
     } else {
@@ -213,13 +658,14 @@ fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<
         &VerifyOptions {
             ranges,
             check: args.check.clone(),
-            no_new_errors: args.no_new_errors,
+            no_new_errors: args.no_new_errors || git_carve::branch::no_new_errors_config(repo)?,
+            fail_fast: args.fail_fast || args.pre_push,
         },
     )?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        let n = report.commits.len();
+        let n = report.commits.len() + report.skipped;
         if n == 0 {
             println!("git carve verify: no commits to check.");
             return Ok(Exit::Success);
@@ -262,9 +708,25 @@ fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<
         match report.failed() {
             0 => println!("Every commit passes."),
             f => {
+                if report.skipped > 0 {
+                    println!(
+                        "A commit does not pass the check. Stopped there: {} later commit{} not checked.",
+                        report.skipped,
+                        if report.skipped == 1 {
+                            " was"
+                        } else {
+                            "s were"
+                        }
+                    );
+                } else {
+                    println!(
+                        "{f} of {n} commit{} {} not pass the check.",
+                        if n == 1 { "" } else { "s" },
+                        if f == 1 { "does" } else { "do" }
+                    );
+                }
                 println!(
-                    "{f} of {n} commit{} do not pass the check.",
-                    if n == 1 { "" } else { "s" }
+                    "hint: to re-split the unpushed commits so each one passes: git carve @{{u}}"
                 );
                 if let Some(e) = report.base_fails {
                     println!(
@@ -340,6 +802,124 @@ fn run_eval(cmd: &EvalCommand) -> anyhow::Result<Exit> {
                 manifest.windows.len() - tune,
                 manifest.sources.len()
             );
+        }
+        EvalCommand::Speed {
+            corpus: path,
+            split,
+            jobs,
+            warm,
+            limit,
+            out,
+        } => {
+            let manifest: corpus::Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
+            let split = split.map(|s| match s {
+                Split::Tune => corpus::Split::Tune,
+                Split::Test => corpus::Split::Test,
+            });
+            if split == Some(corpus::Split::Test) {
+                anyhow::bail!("the speed benchmark never runs on a test split (D51)");
+            }
+            if jobs.is_empty() {
+                anyhow::bail!("--jobs needs at least one count");
+            }
+            let rows = git_carve::eval::speed::speed(
+                &manifest,
+                split,
+                jobs,
+                *warm,
+                *limit,
+                &corpus::cache_dir(),
+                &env,
+            )?;
+            if let Some(out) = out {
+                std::fs::write(out, serde_json::to_string_pretty(&rows)?)?;
+            }
+            let measured: Vec<_> = rows
+                .iter()
+                .filter(|r| r.skipped.is_none() && r.final_ms > 0 && r.runs.len() == jobs.len())
+                .collect();
+            let quantile = |mut v: Vec<f64>, q: f64| {
+                v.sort_by(f64::total_cmp);
+                v.get(((v.len() as f64 - 1.0) * q).round() as usize)
+                    .copied()
+                    .unwrap_or(f64::NAN)
+            };
+            println!(
+                "{} windows measured ({} skipped); one cold check of the final tree: median {} ms",
+                measured.len(),
+                rows.len() - measured.len(),
+                quantile(measured.iter().map(|r| r.final_ms as f64).collect(), 0.5)
+            );
+            for (i, k) in jobs.iter().enumerate() {
+                let ratios: Vec<f64> = measured
+                    .iter()
+                    .map(|r| r.runs[i].wall_ms as f64 / r.final_ms as f64)
+                    .collect();
+                let diffs = measured
+                    .iter()
+                    .filter(|r| r.runs[i].plan != r.runs[0].plan)
+                    .count();
+                println!(
+                    "  jobs {k}: wall/one-check median {:.2}, p90 {:.2}; median wall {} ms; plans differing from jobs {}: {diffs}",
+                    quantile(ratios.clone(), 0.5),
+                    quantile(ratios, 0.9),
+                    quantile(
+                        measured.iter().map(|r| r.runs[i].wall_ms as f64).collect(),
+                        0.5
+                    ),
+                    jobs[0]
+                );
+            }
+        }
+        EvalCommand::RangeCheck {
+            corpus: path,
+            split,
+            limit,
+        } => {
+            let manifest: corpus::Manifest = serde_json::from_slice(&std::fs::read(path)?)?;
+            let split = split.map(|s| match s {
+                Split::Tune => corpus::Split::Tune,
+                Split::Test => corpus::Split::Test,
+            });
+            if split == Some(corpus::Split::Test) && path.ends_with("manifest.json") {
+                anyhow::bail!("range-check never touches the locked corpus's test split");
+            }
+            let r = git_carve::eval::range_check::range_check(
+                &manifest,
+                split,
+                *limit,
+                &corpus::cache_dir(),
+                &env,
+            )?;
+            let median = |v: &[u64]| {
+                let mut v = v.to_vec();
+                v.sort_unstable();
+                v.get(v.len() / 2).copied().unwrap_or(0)
+            };
+            println!(
+                "{} windows: {} identical, {} expected differences (committed assets kept), {} mismatched, {} refused; median plan ms eval {} vs range {}",
+                r.windows,
+                r.identical,
+                r.expected.len(),
+                r.mismatches.len(),
+                r.refused.len(),
+                median(&r.plan_ms_eval),
+                median(&r.plan_ms_range)
+            );
+            for (id, kept) in &r.expected {
+                println!(
+                    "expected {id}: range mode keeps {kept} committed new binary or large file(s)"
+                );
+            }
+            for (id, diff) in &r.mismatches {
+                println!("MISMATCH {id}: {diff}");
+            }
+            for (id, reason) in &r.refused {
+                println!("refused {id}: {reason}");
+            }
+            if !r.mismatches.is_empty() {
+                return Ok(Exit::CheckFailed);
+            }
         }
         EvalCommand::Pairs {
             corpus: path,

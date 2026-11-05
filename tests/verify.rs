@@ -465,6 +465,7 @@ fn a_rescued_carve_commits_only_passing_work_and_undoes_exactly() {
         .collect();
     let file = repo.path().join("../rescued-plan.txt");
     fs::write(&file, filled).unwrap();
+    repo.run(&["config", "carve.agentMessages", "true"]); // D49: a scripted plan file
     let out = repo
         .carve()
         .args(["--check", BROKEN_CHECK, "--plan-file"])

@@ -224,8 +224,7 @@ impl LanguageAdapter for TypeScript {
             .unwrap_or_else(|| "npx --no-install tsc".to_owned());
         let command = projects
             .iter()
-            .enumerate()
-            .map(|(i, p)| format!("{tsc} --noEmit -p {p} --incremental --tsBuildInfoFile ../tsbuildinfo/{i}.tsbuildinfo"))
+            .map(|p| format!("{tsc} --noEmit -p {p} --incremental --tsBuildInfoFile ../tsbuildinfo/{}.tsbuildinfo", build_info_name(p)))
             .collect::<Vec<_>>()
             .join(" && ");
         let display = projects
@@ -558,9 +557,27 @@ fn collect_bindings<'t>(node: Node<'t>, out: &mut Vec<Node<'t>>) {
     }
 }
 
+/// A project's build-info file name, from its path rather than its position in the list, so
+/// a carve that checks a different set of projects reuses each one's own build info
+/// (DECISIONS.md D51). `%` and `/` are escaped, so two paths never share a name.
+fn build_info_name(project: &str) -> String {
+    if project == "." {
+        return "%2E".to_owned();
+    }
+    project.replace('%', "%25").replace('/', "%2F")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_info_names_are_by_path_and_never_collide() {
+        assert_eq!(build_info_name("."), "%2E");
+        assert_eq!(build_info_name("packages/a"), "packages%2Fa");
+        assert_ne!(build_info_name("a/b"), build_info_name("a%2Fb"));
+        assert_ne!(build_info_name("."), build_info_name("%2E"));
+    }
 
     fn facts(src: &str) -> FileFacts {
         TypeScript.analyze(b"x.tsx", src.as_bytes()).unwrap()
