@@ -899,6 +899,7 @@ pub fn ecosystem_check(root: &std::path::Path, changed: &[String]) -> Option<Def
             display: "cargo check --all-targets".to_owned(),
             links: Vec::new(),
             reads: vec!["rs".to_owned()],
+            soft_reads: Vec::new(),
         });
     }
     if has("go.mod") {
@@ -907,6 +908,7 @@ pub fn ecosystem_check(root: &std::path::Path, changed: &[String]) -> Option<Def
             display: "go build ./... && go vet ./...".to_owned(),
             links: Vec::new(),
             reads: vec!["go".to_owned()],
+            soft_reads: Vec::new(),
         });
     }
     let python_project = [
@@ -926,7 +928,7 @@ pub fn ecosystem_check(root: &std::path::Path, changed: &[String]) -> Option<Def
                 .to_owned(),
             display: "python3 -m compileall (syntax only)".to_owned(),
             links: Vec::new(),
-            reads: vec!["py".to_owned()],
+            reads: vec!["py".to_owned()],            soft_reads: Vec::new(),
         });
     }
     None

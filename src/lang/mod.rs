@@ -133,6 +133,9 @@ pub struct DefaultCheck {
     /// File extensions the check reads (DECISIONS.md D45). The probe (D1) targets only these;
     /// other changed source files are reported as unverified.
     pub reads: Vec<String>,
+    /// Of `reads`, the ones the check may or may not read (JavaScript under tsc, D54): a probe
+    /// on them that the check misses means "unverified", never "this check is vacuous".
+    pub soft_reads: Vec<String>,
 }
 
 /// The adapter for `path`, if any.
@@ -152,9 +155,19 @@ pub fn adapter_for(path: &[u8]) -> Option<&'static dyn LanguageAdapter> {
     }
 }
 
-/// Whether `path` is TypeScript (the one tree-sitter adapter).
+/// Whether `path` is TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`).
 pub fn is_typescript(path: &[u8]) -> bool {
-    typescript::TypeScript.matches(path)
+    typescript::TS_EXTENSIONS
+        .iter()
+        .any(|ext| path.ends_with(ext))
+}
+
+/// Whether `path` is JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), which the TypeScript adapter
+/// also reads (D54).
+pub fn is_javascript(path: &[u8]) -> bool {
+    typescript::JS_EXTENSIONS
+        .iter()
+        .any(|ext| path.ends_with(ext))
 }
 
 /// Manifest/lockfile pairs of every ecosystem carve knows (SPEC §6.3 B2).

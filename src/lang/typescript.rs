@@ -104,15 +104,19 @@ const LOCKS: &[(&str, &str)] = &[
     ("package.json", "bun.lockb"),
 ];
 
+/// The files this adapter parses: TypeScript, and JavaScript through the TSX grammar (D54).
+pub const TS_EXTENSIONS: [&[u8]; 4] = [b".ts", b".tsx", b".mts", b".cts"];
+pub const JS_EXTENSIONS: [&[u8]; 4] = [b".js", b".jsx", b".mjs", b".cjs"];
+
 impl LanguageAdapter for TypeScript {
     fn matches(&self, path: &[u8]) -> bool {
-        [&b".ts"[..], b".tsx", b".mts", b".cts"]
-            .iter()
-            .any(|ext| path.ends_with(ext))
+        super::is_typescript(path) || super::is_javascript(path)
     }
 
     fn analyze(&self, path: &[u8], src: &[u8]) -> Option<FileFacts> {
-        let language = if path.ends_with(b".tsx") {
+        // JavaScript may hold JSX in any of its extensions, and has no `<T>x` assertions, so
+        // the TSX grammar reads all of it.
+        let language = if path.ends_with(b".tsx") || super::is_javascript(path) {
             tree_sitter_typescript::LANGUAGE_TSX
         } else {
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT
@@ -241,7 +245,12 @@ impl LanguageAdapter for TypeScript {
             command,
             display,
             links,
-            reads: ["ts", "tsx", "mts", "cts"].map(str::to_owned).to_vec(),
+            reads: ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]
+                .map(str::to_owned)
+                .to_vec(),
+            // tsc reads JavaScript only under allowJs/checkJs, per project: probe it, but a
+            // miss only marks the file unverified.
+            soft_reads: ["js", "jsx", "mjs", "cjs"].map(str::to_owned).to_vec(),
         })
     }
 }
@@ -581,6 +590,40 @@ mod tests {
 
     fn facts(src: &str) -> FileFacts {
         TypeScript.analyze(b"x.tsx", src.as_bytes()).unwrap()
+    }
+
+    /// D54: JavaScript, JSX included, parses with the TSX grammar into the same facts.
+    #[test]
+    fn javascript_files_are_read_with_jsx() {
+        for path in [
+            &b"src/app.js"[..],
+            b"src/App.jsx",
+            b"lib/x.mjs",
+            b"lib/y.cjs",
+        ] {
+            assert!(
+                TypeScript.matches(path),
+                "{}",
+                String::from_utf8_lossy(path)
+            );
+            assert!(crate::lang::is_javascript(path));
+            assert!(!crate::lang::is_typescript(path));
+        }
+        let src = "import { fmt } from './fmt.js';\nexport function App() {\n  console.log('x');\n  return <div>{fmt(1)}</div>;\n}\n";
+        let f = TypeScript.analyze(b"src/App.js", src.as_bytes()).unwrap();
+        assert!(!f.has_error);
+        assert!(f.defs.iter().any(|d| d.name == "App" && d.top_level));
+        assert!(
+            f.imports
+                .iter()
+                .any(|i| i.local == "fmt" && i.source == "./fmt.js")
+        );
+        assert!(f.refs.iter().any(|r| r.name == "fmt"));
+        assert_eq!(
+            f.debug.len(),
+            1,
+            "console.log is debug output in JavaScript too"
+        );
     }
 
     #[test]

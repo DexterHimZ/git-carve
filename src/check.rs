@@ -48,6 +48,8 @@ pub struct CheckSpec {
     /// The file extensions a default check reads (D45); `None` for an explicit check, whose
     /// reach only the probe can tell.
     pub reads: Option<Vec<String>>,
+    /// Of `reads`, extensions whose missed probe means "unverified", not "vacuous" (D54).
+    pub soft_reads: Vec<String>,
     /// Safe to run in several worktrees at once without asking (D51): the default TypeScript
     /// check, whose build info lives next to each worktree. Anything else needs
     /// `carve.checkJobs` (cargo, for one, locks its shared target directory).
@@ -106,13 +108,22 @@ pub fn resolve(repo: &Repo, flag: Option<&str>, changed: &[&[u8]]) -> Result<Che
                     ));
                 }
                 None => {
+                    // D54: a JavaScript project's own script is the natural check.
+                    let example = if changed
+                        .iter()
+                        .any(|p| crate::lang::is_javascript(p.as_bytes()))
+                    {
+                        "npm test"
+                    } else {
+                        "make test"
+                    };
                     return Err(precondition(
                         "carve has no default check for this repository (it found no tsconfig.json, \
                          Cargo.toml, go.mod, or Python project file at the top level)",
-                        Some(
-                            "pass the command that checks your code, such as --check \"make test\", \
-                              or set it once: git config carve.check \"make test\"",
-                        ),
+                        Some(&format!(
+                            "pass the command that checks your code, such as --check \"{example}\", \
+                              or set it once: git config carve.check \"{example}\""
+                        )),
                     ));
                 }
             }
@@ -125,6 +136,7 @@ pub fn resolve(repo: &Repo, flag: Option<&str>, changed: &[&[u8]]) -> Result<Che
         explicit: false,
         links: check.links,
         reads: Some(check.reads),
+        soft_reads: check.soft_reads,
         parallel,
     })
 }
@@ -136,6 +148,7 @@ fn explicit(command: &str) -> CheckSpec {
         explicit: true,
         links: Vec::new(),
         reads: None,
+        soft_reads: Vec::new(),
         parallel: false,
     }
 }
@@ -152,6 +165,11 @@ pub struct Outcome {
     /// output order; `None` when none were recognized (DECISIONS.md D43).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<String>>,
+    /// The run looked for `errors` (every run since D43). Failures cached before that are
+    /// re-run once under a baseline; later ones without recognizable errors (cargo, go, ...)
+    /// stay cached.
+    #[serde(default)]
+    pub diagnosed: bool,
 }
 
 /// D43: `path(line,col): error TS1234: message` (or tsc's pretty `path:line:col - error …`),
@@ -404,7 +422,7 @@ impl<'r> Checker<'r> {
     fn hit(&mut self, tree: &str) -> Option<Outcome> {
         let hit = self.cache.get(&format!("{tree}|{}", self.fingerprint))?;
         // A failure cached before errors were recorded cannot set or meet a baseline.
-        if (self.no_new_errors || self.baseline.is_some()) && !hit.passed && hit.errors.is_none() {
+        if (self.no_new_errors || self.baseline.is_some()) && !hit.passed && !hit.diagnosed {
             return None;
         }
         self.hits += 1;
@@ -504,6 +522,7 @@ impl<'r> Checker<'r> {
                 millis: 0,
                 cached: false,
                 errors: None,
+                diagnosed: false,
             },
         )
     }
@@ -607,6 +626,7 @@ fn run_check(command: &str, dir: &Path, timeout: Duration, target: &Path) -> Res
         millis: started.elapsed().as_millis() as u64,
         cached: false,
         errors,
+        diagnosed: true,
     })
 }
 

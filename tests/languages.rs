@@ -229,3 +229,98 @@ fn an_unknown_ecosystem_is_told_how_to_set_a_check() {
         "no TypeScript advice for a C project: {err}"
     );
 }
+
+/// D54: a JavaScript project. `fmtSize` is added to fmt.js and used in main.js; other.js gets
+/// an unrelated fix. The new helper and its use land in one commit.
+#[test]
+fn javascript_definitions_link_across_files() {
+    let repo = TestRepo::new();
+    repo.write(
+        "package.json",
+        "{ \"name\": \"app\", \"type\": \"module\" }\n",
+    );
+    repo.write(
+        "src/fmt.js",
+        "export function fmt(n) {\n  return `${n}`;\n}\n",
+    );
+    repo.write(
+        "src/main.js",
+        "import { fmt } from './fmt.js';\n\nexport function main(n) {\n  return fmt(n);\n}\n",
+    );
+    repo.write("src/other.js", "export const answer = () => 41;\n");
+    repo.commit_all("base");
+    repo.write("src/fmt.js", "export function fmt(n) {\n  return `${n}`;\n}\n\nexport function fmtSize(n) {\n  return `${n} B`;\n}\n");
+    repo.write("src/main.js", "import { fmt, fmtSize } from './fmt.js';\n\nexport function main(n) {\n  return fmt(n) + fmtSize(n);\n}\n");
+    repo.write("src/other.js", "export const answer = () => 42;\n");
+    let doc = plan_json(&repo, &["--check", "true"]);
+    let group_of = |path: &str| -> usize {
+        let ids: Vec<&serde_json::Value> = doc["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["path"] == path)
+            .map(|a| &a["id"])
+            .collect();
+        let groups = doc["groups"].as_array().unwrap();
+        groups
+            .iter()
+            .position(|g| g.as_array().unwrap().iter().any(|id| ids.contains(&id)))
+            .unwrap_or_else(|| panic!("{path} in no group: {doc}"))
+    };
+    assert_eq!(group_of("src/fmt.js"), group_of("src/main.js"), "{doc}");
+    assert_ne!(group_of("src/other.js"), group_of("src/main.js"), "{doc}");
+}
+
+/// D54 must-change: tsc does not read `next.config.js` (no allowJs). A change to it
+/// alone is reported as unverified; it is not "a vacuous default check".
+#[test]
+fn a_javascript_file_tsc_skips_is_unverified_not_refused() {
+    let repo = TestRepo::demo();
+    if !repo.link_typescript() {
+        return;
+    }
+    repo.write(
+        "next.config.js",
+        "export default { reactStrictMode: true };\n",
+    );
+    repo.commit_all("everything so far");
+    repo.write(
+        "next.config.js",
+        "export default { reactStrictMode: false };\n",
+    );
+    let out = repo.carve().args(["--plan-only"]).output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr(&out));
+    assert!(text.contains("next.config.js"), "{text}");
+    assert!(text.contains("unverified"), "{text}");
+}
+
+/// D54: with allowJs and checkJs, tsc reads JavaScript, so the probe proves a `.js` change.
+#[test]
+fn a_javascript_file_under_allow_js_is_proved_by_the_probe() {
+    let repo = TestRepo::new();
+    if !repo.link_typescript() {
+        return;
+    }
+    repo.write(".gitignore", "node_modules/\n");
+    repo.write("tsconfig.json", "{ \"compilerOptions\": { \"allowJs\": true, \"checkJs\": true, \"noEmit\": true, \"target\": \"ES2022\", \"module\": \"ESNext\", \"moduleResolution\": \"Bundler\" }, \"include\": [\"src\"] }\n");
+    repo.write(
+        "src/util.js",
+        "export function twice(n) {\n  return n * 2;\n}\n",
+    );
+    repo.commit_all("base");
+    repo.write("src/util.js", "export function twice(n) {\n  return n * 2;\n}\n\nexport function thrice(n) {\n  return n * 3;\n}\n");
+    let doc = plan_json(&repo, &[]);
+    let verification = &doc["verification"];
+    let probes = verification["probes"].as_array().unwrap();
+    assert!(
+        probes
+            .iter()
+            .any(|p| p["path"] == "src/util.js" && p["caught"] == true),
+        "{verification}"
+    );
+    assert!(
+        verification["unverified"].as_array().unwrap().is_empty(),
+        "{verification}"
+    );
+}

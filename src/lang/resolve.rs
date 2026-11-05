@@ -16,7 +16,8 @@ pub enum Target {
     Unresolved,
 }
 
-/// Candidate files for a module path without extension, in TypeScript's lookup order.
+/// Candidate files for a module path without extension, in TypeScript's lookup order; the
+/// JavaScript ones last, as under `allowJs` (D54).
 const EXTENSIONS: &[&str] = &[
     ".ts",
     ".tsx",
@@ -25,6 +26,12 @@ const EXTENSIONS: &[&str] = &[
     ".cts",
     "/index.ts",
     "/index.tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    "/index.js",
+    "/index.jsx",
 ];
 
 pub struct Resolver<'a> {
@@ -291,5 +298,26 @@ mod tests {
             Target::Path(b"src/Button.tsx".to_vec())
         );
         assert_eq!(t(&mut r, b"src/a.ts", "react"), Target::Unresolved);
+        // D54: JavaScript resolves after TypeScript, as under allowJs.
+        let js: Vec<&[u8]> = vec![
+            b"src/legacy.js",
+            b"src/both.ts",
+            b"src/both.js",
+            b"src/w/index.jsx",
+        ];
+        let exists = |p: &[u8]| js.contains(&p);
+        let t = |r: &mut Resolver, from: &[u8], spec| r.resolve(from, spec, &exists);
+        assert_eq!(
+            t(&mut r, b"src/a.ts", "./legacy"),
+            Target::Path(b"src/legacy.js".to_vec())
+        );
+        assert_eq!(
+            t(&mut r, b"src/a.js", "./both"),
+            Target::Path(b"src/both.ts".to_vec())
+        );
+        assert_eq!(
+            t(&mut r, b"src/a.js", "./w"),
+            Target::Path(b"src/w/index.jsx".to_vec())
+        );
     }
 }

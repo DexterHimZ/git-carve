@@ -647,8 +647,16 @@ fn probe(
     // D27: a check that reads none of the probed files is vacuous, so the default check is
     // refused (D1). A check that reads some of them proves those; the rest are reported as
     // unverified, whoever chose the check.
+    // D54: a missed probe on a file the check only may read (JavaScript under tsc) is never
+    // evidence of a vacuous check; the file is reported as unverified.
+    let soft = |path: &str| {
+        checker
+            .spec
+            .soft_reads
+            .contains(&crate::lang::extension(path.as_bytes()))
+    };
     let caught_any = report.probes.iter().any(|p| p.caught);
-    if let Some(first) = report.probes.iter().find(|p| !p.caught) {
+    if let Some(first) = report.probes.iter().find(|p| !p.caught && !soft(&p.path)) {
         if !caught_any && !checker.spec.explicit {
             return Err(Error::CheckFailed(format!(
                 "the default check passed on a deliberately broken {}, so it does not \

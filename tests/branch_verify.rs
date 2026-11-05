@@ -465,3 +465,35 @@ fn pre_push_with_an_unknown_remote_commit_still_checks() {
     );
     assert!(!json(&out)["commits"].as_array().unwrap().is_empty());
 }
+
+/// A check without tsc-style diagnostics (cargo, go, `make test`): its failures carry no
+/// parsed errors. Under `--no-new-errors` they must still come from the cache on a second run.
+#[test]
+fn no_new_errors_keeps_cached_failures_of_checks_without_parsed_errors() {
+    let (repo, _) = three_commits();
+    let plain = "! grep -q BROKEN a.txt b.txt c.txt";
+    let run = || {
+        json(
+            &repo
+                .carve()
+                .args([
+                    "verify",
+                    "HEAD~3..HEAD",
+                    "--json",
+                    "--no-new-errors",
+                    "--check",
+                    plain,
+                ])
+                .output()
+                .unwrap(),
+        )
+    };
+    let first = run();
+    assert!(first["runs"].as_u64().unwrap() >= 3, "{first}");
+    let second = run();
+    assert_eq!(
+        second["runs"], 0,
+        "failures without parsed errors stay cached: {second}"
+    );
+    assert_eq!(passed(&second), passed(&first));
+}
