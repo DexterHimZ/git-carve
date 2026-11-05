@@ -209,6 +209,12 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
             submit.is_some(),
         )?;
         if let Some((trunk, _remote)) = &submit {
+            if stack.adopted > 0 {
+                eprintln!(
+                    "git carve: --submit does not resubmit an adopted stack yet; your commits and layer branches are complete, run the commands above"
+                );
+                return Ok(Exit::SubmitFailed);
+            }
             return Ok(submit_stack(stack, trunk, false).0);
         }
     }
@@ -380,7 +386,7 @@ fn run_report(
                 .iter()
                 .enumerate()
                 .map(|(k, (b, oid, subject))| {
-                    json!({"k": k + 1, "branch": b, "oid": oid, "subject": subject})
+                    json!({"k": k + 1, "branch": b, "oid": oid, "subject": subject, "adopted": k < st.adopted})
                 })
                 .collect();
             layers.push(json!({
@@ -391,6 +397,20 @@ fn run_report(
                 "top": true,
             }));
             let submitted = match submit {
+                Some(_) if st.adopted > 0 => {
+                    exit = Exit::SubmitFailed;
+                    json!({
+                        "ran": false,
+                        "ok": false,
+                        "reason": "--submit does not resubmit an adopted stack yet",
+                        "commands": adopted_commands(repo, st, &branches, trunk.as_deref(), remote.as_deref())?,
+                    })
+                }
+                None if st.adopted > 0 => json!({
+                    "ran": false,
+                    "ok": null,
+                    "commands": adopted_commands(repo, st, &branches, trunk.as_deref(), remote.as_deref())?,
+                }),
                 Some((trunk, _)) => {
                     let (code, commands) = submit_stack(st, trunk, true);
                     exit = code;
@@ -407,6 +427,7 @@ fn run_report(
                 "remote": remote,
                 "tool": tool,
                 "layers": layers,
+                "stale": st.stale,
                 "submit": submitted,
             })
         }
@@ -473,11 +494,28 @@ fn print_stack(
             );
         }
     }
-    if !replaces.is_empty() {
+    if !replaces.is_empty() && stack.adopted == 0 {
         println!(
             "note: {} already exist; pushing the new layers replaces them",
             replaces.join(", ")
         );
+    }
+    if !stack.stale.is_empty() {
+        println!(
+            "note: {} no longer in the stack; carve left them as they were (close their PRs)",
+            stack.stale.join(", ")
+        );
+    }
+    if stack.adopted > 0 {
+        println!(
+            "To update the stack's PRs ({} of {} layers kept their branch; nothing was pushed):",
+            stack.adopted,
+            branches.len()
+        );
+        for c in adopted_commands(repo, stack, &branches, trunk.as_deref(), remote.as_deref())? {
+            println!("  {c}");
+        }
+        return Ok(());
     }
     if submitting {
         return Ok(());
@@ -502,6 +540,48 @@ fn print_stack(
         }
     }
     Ok(())
+}
+
+/// D52: the commands that update an adopted stack's PRs. The adopted layers moved, so they
+/// need a force-push; each lease pins the remote commit carve saw, so a push someone else made
+/// in between is refused, not overwritten.
+fn adopted_commands(
+    repo: &Repo,
+    stack: &git_carve::session::StackSummary,
+    branches: &[String],
+    trunk: Option<&str>,
+    remote: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let remote = remote.unwrap_or("<remote>");
+    let mut push = format!("git push -u {remote}");
+    for b in branches {
+        let tracked = format!("refs/remotes/{remote}/{b}");
+        if let Some(oid) = repo
+            .git
+            .try_run_str(["rev-parse", "-q", "--verify", &tracked])?
+        {
+            push.push_str(&format!(" --force-with-lease={b}:{oid}"));
+        }
+    }
+    push.push(' ');
+    push.push_str(&branches.join(" "));
+    let mut out = vec![push];
+    let mut below = trunk.unwrap_or("<trunk>");
+    for (k, b) in branches.iter().enumerate() {
+        if k >= stack.adopted && k + 1 < branches.len() {
+            out.push(format!("gh pr create --base {below} --head {b} --fill"));
+        }
+        below = b;
+    }
+    // The top branch's PR targeted the old top layer, which changed with the layer count.
+    if stack.adopted != stack.layers.len() || !stack.stale.is_empty() {
+        let under = match branches.len().checked_sub(2) {
+            Some(i) => branches[i].as_str(),
+            None => trunk.unwrap_or("<trunk>"),
+        };
+        out.push(format!("gh pr edit {} --base {under}", stack.branch));
+    }
+    Ok(out)
 }
 
 /// SPEC §10.4. Subjects are the user's own first lines.

@@ -61,6 +61,10 @@ pub struct StackSummary {
     pub branch: String,
     /// `(branch, commit, subject)` for layers 1..N-1.
     pub layers: Vec<(String, String, String)>,
+    /// D52: how many of `layers`, from the bottom, are an earlier stack's branches, moved.
+    pub adopted: usize,
+    /// D52: an earlier stack's layers above the new ones, left where they were.
+    pub stale: Vec<String>,
 }
 
 /// Plans and verifies (the `--plan-only` part of a run).
@@ -149,26 +153,49 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
                 .into(),
         ));
     }
-    if let Some(branch) = &stack_branch {
-        let left = crate::stack::existing_layers(repo, branch, prepared.plan.groups.len())?;
-        if !left.is_empty() {
-            return Err(crate::error::precondition(
-                format!(
-                    "branches from an earlier --stack exist: {}",
-                    left.join(", ")
-                ),
-                Some(
-                    "after review, change layers with `gh stack modify` or `gh stack rebase`; to re-carve from scratch, delete them with `git branch -D`",
-                ),
-            ));
-        }
+    // D52: an earlier stack's layers are adopted (moved, so their PRs survive) when they
+    // still form this branch's stack, and refused before the editor otherwise.
+    let recovered = commit::recover_layers(repo)?;
+    if !recovered.is_empty() {
+        return Err(Error::Concurrent(format!(
+            "an interrupted carve moved {} and they moved again since; check them, then re-run",
+            recovered.join(", ")
+        )));
     }
+    let adopted = match &stack_branch {
+        Some(branch) => match crate::stack::adopt(
+            repo,
+            branch,
+            &prepared.snap.base.commit,
+            &prepared.snap.head.commit,
+        )? {
+            Ok(adopted) => adopted,
+            Err(why) => {
+                return Err(crate::error::precondition(
+                    format!("branches from an earlier --stack cannot be adopted: {why}"),
+                    Some(
+                        "a re-carve adopts layers `<branch>-1`, `<branch>-2`, ... that are commits of this branch, in order; rename a stray one with `git branch -m` (a layer branch may carry a PR)",
+                    ),
+                ));
+            }
+        },
+        None => Vec::new(),
+    };
     let saved_path = repo.carve_dir.join("PLAN.saved");
     let saved: Saved = fs::read(&saved_path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    let (messages, notes) = plan::restore(&saved, &prepared.changes, &prepared.plan.groups);
+    let (messages, mut notes) = plan::restore(&saved, &prepared.changes, &prepared.plan.groups);
+    if !adopted.is_empty() {
+        // D52: positional, so the order of the commit blocks below decides which PR shows what.
+        let names: Vec<&str> = adopted.iter().map(|a| a.name.as_str()).collect();
+        notes.push(format!(
+            "# stack: commits 1-{} move {} (adopted: their PRs stay); the last commit is the branch itself",
+            names.len(),
+            names.join(", ")
+        ));
+    }
     let diff_lines = repo.config_u64("carve.planDiff", plan::DIFF_TOTAL_DEFAULT as u64)? as usize;
     let mut text = plan::render_range(
         &prepared.changes,
@@ -322,7 +349,7 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
     let layers = match &stack_branch {
         Some(branch) => {
             let names = crate::stack::layer_names(branch, &subjects);
-            for name in &names {
+            for name in names.iter().skip(adopted.len()) {
                 let valid = repo.git.test(["check-ref-format", "--branch", name])?;
                 let taken =
                     repo.git
@@ -344,8 +371,18 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
                 }
             }
             names
+                .into_iter()
+                .enumerate()
+                .map(|(k, name)| match adopted.get(k) {
+                    Some(a) => commit::Layer {
+                        name: a.name.clone(),
+                        was: Some(a.oid.clone()),
+                    },
+                    None => commit::Layer { name, was: None },
+                })
+                .collect()
         }
-        None => Vec::new(),
+        None => Vec::<commit::Layer>::new(),
     };
     let record = match commit::commit_stacked(
         repo,
@@ -367,7 +404,13 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             .iter()
             .zip(&record.commits)
             .zip(&subjects)
-            .map(|((name, oid), subject)| (name.clone(), oid.clone(), subject.clone()))
+            .map(|((layer, oid), subject)| (layer.name.clone(), oid.clone(), subject.clone()))
+            .collect(),
+        adopted: adopted.len().min(layers.len()),
+        stale: adopted
+            .iter()
+            .skip(layers.len())
+            .map(|a| a.name.clone())
             .collect(),
     });
     Ok(Summary {

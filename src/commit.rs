@@ -28,12 +28,24 @@ pub struct Hooks<'a> {
     pub before_ref_update: Option<&'a dyn Fn()>,
 }
 
-/// A stack layer branch carve created (D48): undo deletes it if it still points here.
+/// A stack layer branch carve created (D48) or moved (D52): undo deletes it, or moves it
+/// back to `was`, if it still points here.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackRef {
     #[serde(rename = "ref")]
     pub ref_name: String,
     pub oid: String,
+    /// Where an adopted layer pointed before the re-carve (D52); absent for new layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+}
+
+/// One layer branch for [`commit_stacked`]: a new name, or an earlier stack's branch that
+/// must still point at `was` (D52, compare-and-swap).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layer {
+    pub name: String,
+    pub was: Option<String>,
 }
 
 /// Written to `<git-path carve>/undo.json` after a successful run (§10.4).
@@ -67,16 +79,17 @@ pub fn commit(
     commit_stacked(repo, snap, changes, groups, hooks, &[], None)
 }
 
-/// [`commit`] plus one new branch per commit but the last (`--stack`, D48): `layers[k]`
-/// is created at commit k only if it does not exist, after the race guard and before the
-/// main compare-and-swap, and deleted again if that fails.
+/// [`commit`] plus one branch per commit but the last (`--stack`, D48): `layers[k]` is
+/// created at commit k only if it does not exist, or, when adopted (D52), moved there only if
+/// it still points at `was`. This happens after the race guard and before the main
+/// compare-and-swap, and is undone if that fails.
 pub fn commit_stacked(
     repo: &Repo,
     snap: &Snapshot,
     changes: &Changes,
     groups: &[Group],
     hooks: &Hooks,
-    layers: &[String],
+    layers: &[Layer],
     plan_source: Option<&str>,
 ) -> Result<UndoRecord> {
     if !layers.is_empty() && layers.len() + 1 != groups.len() {
@@ -127,22 +140,47 @@ pub fn commit_stacked(
     }
     let mut stack = Vec::with_capacity(layers.len());
     let null = repo.format.null_oid();
-    for (k, name) in layers.iter().enumerate() {
-        let ref_name = format!("refs/heads/{name}");
+    // D52: an adopted layer may carry a PR. If carve dies between moving it and the main
+    // compare-and-swap, the next run puts it back from this journal (`recover_layers`).
+    let journal: Vec<StackRef> = layers
+        .iter()
+        .zip(&commits)
+        .map(|(l, oid)| StackRef {
+            ref_name: format!("refs/heads/{}", l.name),
+            oid: oid.clone(),
+            was: l.was.clone(),
+        })
+        .collect();
+    if !journal.is_empty() {
+        let json = serde_json::to_vec(&journal)
+            .map_err(|e| Error::Internal(format!("serialize layer journal: {e}")))?;
+        fs::write(journal_path(repo), json).map_err(io("write the layer journal"))?;
+    }
+    for (k, layer) in layers.iter().enumerate() {
+        let ref_name = format!("refs/heads/{}", layer.name);
         let msg = format!("carve: stack layer {} of {}", k + 1, commits.len());
+        let expect = layer.was.as_deref().unwrap_or(&null);
         if repo
             .git
-            .run(["update-ref", "-m", &msg, &ref_name, &commits[k], &null])
+            .run(["update-ref", "-m", &msg, &ref_name, &commits[k], expect])
             .is_err()
         {
             remove_layers(repo, &stack);
+            let _ = fs::remove_file(journal_path(repo));
+            let what = if layer.was.is_some() {
+                "moved"
+            } else {
+                "appeared"
+            };
             return Err(Error::Concurrent(format!(
-                "branch {name} appeared during carve; nothing was changed, re-run"
+                "branch {} {what} during carve; nothing was changed, re-run",
+                layer.name
             )));
         }
         stack.push(StackRef {
             ref_name,
             oid: commits[k].clone(),
+            was: layer.was.clone(),
         });
     }
 
@@ -179,6 +217,7 @@ pub fn commit_stacked(
     };
     if update.is_err() {
         remove_layers(repo, &stack);
+        let _ = fs::remove_file(journal_path(repo));
         return Err(Error::Concurrent(format!(
             "{ref_name} moved during carve; nothing was changed, re-run"
         )));
@@ -197,6 +236,7 @@ pub fn commit_stacked(
         plan_source: plan_source.map(str::to_owned),
     };
     write_undo(repo, &record)?;
+    let _ = fs::remove_file(journal_path(repo));
 
     // The one write to the real index: match the new HEAD, then refresh stat data.
     // Leave atoms now show up as unstaged changes, exactly as before.
@@ -258,20 +298,45 @@ fn clean_message(repo: &Repo, k: usize, message: &str) -> Result<String> {
     Ok(cleaned)
 }
 
-/// Deletes layer branches that still point where carve put them; returns the ones that
-/// moved (kept).
+/// Deletes layer branches that still point where carve put them, and moves adopted ones
+/// back (D52); returns the ones that moved since (kept).
 pub fn remove_layers(repo: &Repo, stack: &[StackRef]) -> Vec<String> {
     let mut kept = Vec::new();
     for s in stack {
-        if repo
-            .git
-            .run(["update-ref", "-d", &s.ref_name, &s.oid])
-            .is_err()
-        {
+        let undone = match &s.was {
+            Some(was) => repo.git.run([
+                "update-ref",
+                "-m",
+                "carve: undo stack layer",
+                &s.ref_name,
+                was,
+                &s.oid,
+            ]),
+            None => repo.git.run(["update-ref", "-d", &s.ref_name, &s.oid]),
+        };
+        if undone.is_err() {
             kept.push(s.ref_name.trim_start_matches("refs/heads/").to_owned());
         }
     }
     kept
+}
+
+fn journal_path(repo: &Repo) -> std::path::PathBuf {
+    repo.carve_dir.join("layers.journal")
+}
+
+/// D52: after a run that died between moving layer branches and committing, moves them back
+/// (compare-and-swap, as undo does) and returns the ones that moved since (kept).
+pub fn recover_layers(repo: &Repo) -> Result<Vec<String>> {
+    let path = journal_path(repo);
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(Vec::new());
+    };
+    let journal: Vec<StackRef> = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Internal(format!("read {}: {e}", path.display())))?;
+    let kept = remove_layers(repo, &journal);
+    fs::remove_file(&path).map_err(io(format!("remove {}", path.display())))?;
+    Ok(kept)
 }
 
 pub fn undo_path(repo: &Repo) -> std::path::PathBuf {

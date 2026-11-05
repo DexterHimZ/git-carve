@@ -9,7 +9,7 @@ use std::process::Output;
 use common::{TYPE_MESSAGES, TestRepo, editor, per_file, stderr};
 use git_carve::Error;
 use git_carve::atom::atomize;
-use git_carve::commit::{Group, Hooks, UndoRecord, commit_stacked};
+use git_carve::commit::{Group, Hooks, Layer, UndoRecord, commit_stacked};
 use git_carve::snapshot;
 
 /// The SPEC §14.1 demo mess committed as three wip commits on branch `feat`, with `main`
@@ -203,7 +203,12 @@ fn safety_stack_cas_race_leaves_no_layer_branch() {
             message: format!("Commit {}\n", k + 1),
         })
         .collect();
-    let layers: Vec<String> = (1..groups.len()).map(|k| format!("feat-{k}")).collect();
+    let layers: Vec<Layer> = (1..groups.len())
+        .map(|k| Layer {
+            name: format!("feat-{k}"),
+            was: None,
+        })
+        .collect();
     let racer = repo.run(&["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "racer"]);
     let move_ref = || {
         repo.run(&["update-ref", "refs/heads/feat", &racer]);
@@ -214,8 +219,12 @@ fn safety_stack_cas_race_leaves_no_layer_branch() {
     };
     let err = commit_stacked(&r, &snap, &changes, &groups, &hooks, &layers, None).unwrap_err();
     assert!(matches!(err, Error::Concurrent(_)), "{err}");
-    for name in &layers {
-        assert!(branch_tip(&repo, name).is_none(), "{name} left behind");
+    for layer in &layers {
+        assert!(
+            branch_tip(&repo, &layer.name).is_none(),
+            "{} left behind",
+            layer.name
+        );
     }
     assert_eq!(repo.run(&["rev-parse", "feat"]), racer);
 }
@@ -566,5 +575,218 @@ fn stack_submit_json_stays_valid_and_reports_failure() {
         stderr(&out).contains("not authenticated"),
         "{}",
         stderr(&out)
+    );
+}
+
+/// A carved stack whose layer branches were renamed, as if their names came from other
+/// subjects: a re-carve must move these, not create `feat-1-commit-1-subject`.
+fn reviewed_stack() -> (TestRepo, String, String) {
+    let (repo, _) = feature_branch();
+    let out = carve_stack(&repo, &["main", "--stack", "--no-check"], None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    repo.run(&["branch", "-m", "feat-1-commit-1-subject", "feat-1-reviewed"]);
+    repo.run(&["branch", "-m", "feat-2-commit-2-subject", "feat-2-reviewed"]);
+    let one = branch_tip(&repo, "feat-1-reviewed").unwrap();
+    let two = branch_tip(&repo, "feat-2-reviewed").unwrap();
+    (repo, one, two)
+}
+
+#[test]
+fn stack_recarve_adopts_existing_layers_and_undo_moves_them_back() {
+    let (repo, one, two) = reviewed_stack();
+    // A review fix, uncommitted.
+    let format = fs::read_to_string(repo.path().join("src/format.ts")).unwrap();
+    repo.write("src/format.ts", format!("{format}// reviewed\n"));
+    let before = repo.observable();
+    let out = carve_stack(&repo, &["main", "--stack", "--no-check"], None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = out_str(&out);
+    assert_eq!(
+        branch_tip(&repo, "feat-1-reviewed").as_deref(),
+        Some(repo.run(&["rev-parse", "feat~2"]).as_str())
+    );
+    assert_eq!(
+        branch_tip(&repo, "feat-2-reviewed").as_deref(),
+        Some(repo.run(&["rev-parse", "feat~1"]).as_str())
+    );
+    assert_ne!(branch_tip(&repo, "feat-1-reviewed").unwrap(), one);
+    assert!(branch_tip(&repo, "feat-1-commit-1-subject").is_none());
+    assert!(text.contains("2 of 3 layers kept their branch"), "{text}");
+    assert!(text.contains("--force-with-lease") || text.contains("git push -u <remote>"));
+
+    let out = repo.carve().arg("--undo").output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(branch_tip(&repo, "feat-1-reviewed"), Some(one));
+    assert_eq!(branch_tip(&repo, "feat-2-reviewed"), Some(two));
+    assert_eq!(repo.observable(), before);
+}
+
+#[test]
+fn stack_recarve_buffer_names_the_adopted_layers() {
+    let (repo, _, _) = reviewed_stack();
+    let out = repo
+        .carve()
+        .args(["main", "--stack", "--no-check"])
+        .env("GIT_EDITOR", "cat")
+        .output()
+        .unwrap();
+    // `cat` leaves the messages empty, so nothing is committed; the buffer is on stdout.
+    let text = out_str(&out);
+    assert!(
+        text.contains("# stack: commits 1-2 move feat-1-reviewed, feat-2-reviewed"),
+        "{text}{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn stack_recarve_refuses_a_layer_checked_out_elsewhere() {
+    let (repo, one, _) = reviewed_stack();
+    let other = tempfile::tempdir().unwrap();
+    let wt = other.path().join("review");
+    repo.run(&[
+        "worktree",
+        "add",
+        "-q",
+        wt.to_str().unwrap(),
+        "feat-1-reviewed",
+    ]);
+    let out = carve_stack(&repo, &["main", "--stack", "--no-check"], None);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("feat-1-reviewed is checked out in another worktree"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(branch_tip(&repo, "feat-1-reviewed"), Some(one));
+}
+
+#[test]
+fn stack_recarve_refuses_two_branches_for_one_layer() {
+    let (repo, _, two) = reviewed_stack();
+    repo.run(&["branch", "feat-2-other", &two]);
+    let out = carve_stack(&repo, &["main", "--stack", "--no-check"], None);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("both claim layer 2"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn safety_stack_failed_adoption_moves_earlier_layers_back_never_deletes() {
+    let (repo, base) = feature_branch();
+    let one = repo.run(&["rev-parse", "feat~2"]);
+    let two = repo.run(&["rev-parse", "feat~1"]);
+    repo.run(&["branch", "feat-1-pr", &one]);
+    repo.run(&["branch", "feat-2-pr", &two]);
+    let r = repo.open();
+    let snap = snapshot::take_since(&r, Some(&base)).unwrap();
+    let changes = atomize(&r, &snap).unwrap();
+    let groups: Vec<Group> = per_file(&changes)
+        .into_iter()
+        .take(3)
+        .enumerate()
+        .map(|(k, atoms)| Group {
+            atoms,
+            message: format!("Commit {}\n", k + 1),
+        })
+        .collect();
+    let mut all = per_file(&changes);
+    let rest: Vec<_> = all.drain(3..).flatten().collect();
+    let mut groups = groups;
+    groups.last_mut().unwrap().atoms.extend(rest);
+    // Layer 2 moved after carve read it (someone ran `gh stack modify`): the CAS fails.
+    let layers = vec![
+        Layer {
+            name: "feat-1-pr".into(),
+            was: Some(one.clone()),
+        },
+        Layer {
+            name: "feat-2-pr".into(),
+            was: Some(base.clone()),
+        },
+    ];
+    let err = commit_stacked(
+        &r,
+        &snap,
+        &changes,
+        &groups,
+        &Hooks::default(),
+        &layers,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Concurrent(_)), "{err}");
+    assert_eq!(branch_tip(&repo, "feat-1-pr"), Some(one), "moved back");
+    assert_eq!(branch_tip(&repo, "feat-2-pr"), Some(two), "untouched");
+    let journal = repo.run(&["rev-parse", "--git-path", "carve/layers.journal"]);
+    assert!(!repo.path().join(journal).exists());
+}
+
+#[test]
+fn safety_stack_interrupted_adoption_is_recovered_from_the_journal() {
+    let (repo, one, _) = reviewed_stack();
+    // As if carve died after moving the layer: the branch is elsewhere, the journal says where
+    // it was.
+    let moved = repo.run(&["rev-parse", "main"]);
+    repo.run(&["update-ref", "refs/heads/feat-1-reviewed", &moved]);
+    let journal = serde_json::json!([
+        {"ref": "refs/heads/feat-1-reviewed", "oid": moved, "was": one},
+    ]);
+    let path = repo.run(&["rev-parse", "--git-path", "carve/layers.journal"]);
+    fs::write(repo.path().join(&path), journal.to_string()).unwrap();
+    let format = fs::read_to_string(repo.path().join("src/format.ts")).unwrap();
+    repo.write("src/format.ts", format!("{format}// reviewed\n"));
+    let out = carve_stack(&repo, &["main", "--stack", "--no-check"], None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!repo.path().join(&path).exists());
+    assert_eq!(
+        branch_tip(&repo, "feat-1-reviewed").as_deref(),
+        Some(repo.run(&["rev-parse", "feat~2"]).as_str()),
+        "recovered, then adopted"
+    );
+}
+
+#[test]
+fn stack_recarve_of_pushed_layers_prints_leased_pushes_and_never_submits() {
+    let (repo, one, _) = reviewed_stack();
+    let _remote = with_remote(&repo);
+    repo.run(&[
+        "push",
+        "-q",
+        "origin",
+        "feat-1-reviewed",
+        "feat-2-reviewed",
+        "feat",
+    ]);
+    let format = fs::read_to_string(repo.path().join("src/format.ts")).unwrap();
+    repo.write("src/format.ts", format!("{format}// reviewed\n"));
+    let (_gh, path) = fake_gh(true);
+    let out = carve_stack(
+        &repo,
+        &[
+            "main",
+            "--stack",
+            "--check",
+            "true",
+            "--rewrite-pushed",
+            "--submit",
+        ],
+        Some(&path),
+    );
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+    let text = out_str(&out);
+    assert!(
+        text.contains(&format!("--force-with-lease=feat-1-reviewed:{one}")),
+        "{text}"
+    );
+    assert!(stderr(&out).contains("does not resubmit an adopted stack"));
+    let log = fs::read_to_string(_gh.path().join("gh.log")).unwrap_or_default();
+    assert!(!log.contains("stack submit"), "{log}");
+    assert_eq!(
+        branch_tip(&repo, "feat-1-reviewed").as_deref(),
+        Some(repo.run(&["rev-parse", "feat~2"]).as_str())
     );
 }

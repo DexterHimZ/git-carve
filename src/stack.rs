@@ -120,7 +120,7 @@ pub fn trunk_name(
 }
 
 /// Branches an earlier `--stack` left for this branch (`<branch>-<k>` or `<branch>-<k>-*`,
-/// k in 1..=n): a re-carve must not reuse or overwrite them.
+/// k in 1..=n). A re-carve adopts them ([`adopt`], D52) or refuses.
 pub fn existing_layers(repo: &Repo, branch: &str, n: usize) -> Result<Vec<String>> {
     let listed = repo.git.run_str([
         "for-each-ref",
@@ -140,6 +140,83 @@ pub fn existing_layers(repo: &Repo, branch: &str, n: usize) -> Result<Vec<String
         })
         .map(str::to_owned)
         .collect())
+}
+
+/// A layer branch an earlier `--stack` left, adopted by a re-carve (D52).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Adopted {
+    pub name: String,
+    pub oid: String,
+}
+
+/// D52: the layers an earlier `--stack` left for `branch`, bottom first, when they still form
+/// its stack: exactly one `<branch>-<k>[-*]` for each k in 1..=m, each tip a commit of
+/// base..head, each strictly below the next. `Err` says what is wrong instead: carve never
+/// guesses which branch a PR belongs to.
+pub fn adopt(
+    repo: &Repo,
+    branch: &str,
+    base: &str,
+    head: &str,
+) -> Result<std::result::Result<Vec<Adopted>, String>> {
+    let mut by_k: Vec<(usize, String)> = existing_layers(repo, branch, usize::MAX)?
+        .into_iter()
+        .map(|name| {
+            let k: String = name[branch.len() + 1..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            (k.parse().unwrap_or(0), name)
+        })
+        .collect();
+    by_k.sort();
+    // Moving a branch another worktree has checked out would leave that worktree's index
+    // disagreeing with its HEAD.
+    let checked_out: Vec<String> = repo
+        .git
+        .run_str(["worktree", "list", "--porcelain"])?
+        .lines()
+        .filter_map(|l| l.strip_prefix("branch refs/heads/"))
+        .map(str::to_owned)
+        .collect();
+    if let Some((_, name)) = by_k.iter().find(|(_, n)| checked_out.contains(n)) {
+        return Ok(Err(format!("{name} is checked out in another worktree")));
+    }
+    let mut out: Vec<Adopted> = Vec::with_capacity(by_k.len());
+    for (i, (k, name)) in by_k.iter().enumerate() {
+        if let Some((_, other)) = by_k[..i].iter().find(|(j, _)| j == k) {
+            return Ok(Err(format!("{other} and {name} both claim layer {k}")));
+        }
+        if *k != i + 1 {
+            return Ok(Err(format!(
+                "layer {} is missing below {name}",
+                out.len() + 1
+            )));
+        }
+        let oid = repo
+            .git
+            .run_str(["rev-parse", &format!("refs/heads/{name}^{{commit}}")])?;
+        let below = out.last().map_or(base, |a| a.oid.as_str());
+        let inside = oid != below
+            && repo
+                .git
+                .test(["merge-base", "--is-ancestor", below, &oid])?
+            && repo.git.test(["merge-base", "--is-ancestor", &oid, head])?;
+        if !inside || oid == head {
+            let place = match out.last() {
+                Some(a) => format!("above {}", a.name),
+                None => "above the base".to_owned(),
+            };
+            return Ok(Err(format!(
+                "{name} is not a commit of this branch {place} and below its top"
+            )));
+        }
+        out.push(Adopted {
+            name: name.clone(),
+            oid,
+        });
+    }
+    Ok(Ok(out))
 }
 
 /// How the stack gets submitted: the `gh stack` extension when installed, else plain
