@@ -64,6 +64,74 @@ say "Proof 3: undo restored the exact state"
 [ "$(git status --porcelain=v2; git diff)" = "$BEFORE_STATUS" ] && echo "    git status and git diff are byte-identical to before" || { echo "    FAILED"; exit 1; }
 [ "$(fingerprint)" = "$BEFORE_FILES" ] && echo "    working tree still untouched" || { echo "    FAILED"; exit 1; }
 
+say "Already committed? git carve <base> re-carves the commits too (D47)"
+WIP=$(mktemp -d /tmp/carve-try-wip.XXXXXX)
+"$ROOT/scripts/make-demo-repo.sh" "$WIP" --typescript >/dev/null
+(
+  cd "$WIP"
+  commit() { git -c user.name=demo -c user.email=demo@example.com commit -qm "$1"; }
+  git add src/format.ts src/main.ts src/progress.ts && commit "wip"
+  git add src/net.ts tests/net.test.ts src/parse.ts && commit "asdf"
+  git add -A && commit "fix stuff"
+  echo "  An agent committed the same mess as:"; git log --oneline -3 | sed 's/^/     /'
+  echo "  Each new commit names the old commits its lines came from:"
+  git carve HEAD~3 --plan-only 2>/dev/null | grep '^# from' | sed 's/^/     /'
+  BEFORE=$(fingerprint)
+  TYPIST=$(mktemp /tmp/carve-typist.XXXXXX)
+  printf '%s\n' '#!/bin/sh' "awk '/^commit\$/ { print; n++; printf \"Subject typed by you, commit %d\\n\", n; next } { print }' \"\$1\" > \"\$1.tmp\" && mv \"\$1.tmp\" \"\$1\"" > "$TYPIST"
+  chmod +x "$TYPIST"
+  GIT_EDITOR="$TYPIST" git carve HEAD~3 | sed 's/^/     /'
+  rm -f "$TYPIST"
+  [ "$(fingerprint)" = "$BEFORE" ] && echo "     working tree untouched; the committed debug lines are uncommitted again" || { echo "     FAILED"; exit 1; }
+  git carve --undo >/dev/null && echo "     git carve --undo: back on \"$(git log -1 --format=%s)\""
+)
+rm -rf "$WIP"
+
+say "From a branch to a stack: git carve main --stack (D48)"
+STK=$(mktemp -d /tmp/carve-try-stack.XXXXXX)
+"$ROOT/scripts/make-demo-repo.sh" "$STK" --typescript >/dev/null
+(
+  cd "$STK"
+  commit() { git -c user.name=demo -c user.email=demo@example.com commit -qm "$1"; }
+  git branch -m feat && git branch main
+  git add -A && commit "everything at once"
+  TYPIST=$(mktemp /tmp/carve-typist.XXXXXX)
+  printf '%s\n' '#!/bin/sh' "awk '/^commit\$/ { print; n++; printf \"Layer %d by you\\n\", n; next } { print }' \"\$1\" > \"\$1.tmp\" && mv \"\$1.tmp\" \"\$1\"" > "$TYPIST"
+  chmod +x "$TYPIST"
+  GIT_EDITOR="$TYPIST" git carve main --stack 2>/dev/null | sed -n '/^Stack on/,$p' | sed 's/^/     /'
+  rm -f "$TYPIST"
+  echo "     branches now: $(git branch --format='%(refname:short)' | tr '\n' ' ')"
+  git carve --undo >/dev/null && echo "     git carve --undo removed the layer branches: $(git branch --format='%(refname:short)' | tr '\n' ' ')"
+)
+rm -rf "$STK"
+
+say "Gate every push: git carve hooks install (D50), with fail-fast and parallel checks (D51)"
+GATE=$(mktemp -d /tmp/carve-try-gate.XXXXXX)
+"$ROOT/scripts/make-demo-repo.sh" "$GATE/repo" --typescript >/dev/null
+(
+  cd "$GATE/repo"
+  commit() { git -c user.name=demo -c user.email=demo@example.com commit -qm "$1"; }
+  git init -q --bare "$GATE/remote.git"
+  git remote add origin "$GATE/remote.git" && git push -q -u origin main
+  git carve hooks install | sed 's/^/     /'
+  # An agent's history: the rename lands before its callers are updated.
+  git add src/format.ts && commit "rename fmtBytes"
+  git add -A && commit "everything else"
+  echo "     \$ git push    (the hook checks each pushed commit and stops at the first failure)"
+  git push -q origin main 2>&1 | sed 's/^/     /' || true
+  echo "     what an agent's hook tells it (git carve hooks run claude):"
+  printf '{"tool_input":{"command":"git push"},"cwd":"%s"}' "$PWD" \
+    | git carve hooks run claude 2>&1 | sed -n '1,4p' | sed 's/^/       /' || true
+  TYPIST=$(mktemp /tmp/carve-typist.XXXXXX)
+  printf '%s\n' '#!/bin/sh' "awk '/^commit\$/ { print; n++; printf \"Part %d\\n\", n; next } { print }' \"\$1\" > \"\$1.tmp\" && mv \"\$1.tmp\" \"\$1\"" > "$TYPIST"
+  chmod +x "$TYPIST"
+  echo "     \$ git carve @{u}    (re-split the unpushed commits; you write the messages)"
+  GIT_EDITOR="$TYPIST" git carve @{u} 2>/dev/null | sed -n '1,2p' | sed 's/^/     /'
+  rm -f "$TYPIST"
+  git push -q origin main 2>&1 | sed 's/^/     /' && echo "     pushed: $(git log --oneline origin/main | head -n 4 | tr '\n' ';')"
+)
+rm -rf "$GATE"
+
 say "When things don't compile (throwaway copies of the demo)"
 BROKEN=$(mktemp -d /tmp/carve-try-broken.XXXXXX)
 "$ROOT/scripts/make-demo-repo.sh" "$BROKEN" --typescript >/dev/null

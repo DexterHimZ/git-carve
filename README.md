@@ -109,6 +109,97 @@ change the grouping, carve checks again before it commits anything.
 - **It refuses what it can't handle safely:** staged changes, a merge or rebase in progress,
   submodules.
 
+## Already committed? Re-carve it
+
+Agents commit as they go, and so do people: `wip`, `asdf`, `fix stuff`. carve doesn't need a
+dirty tree. Give it a base, and it re-carves everything since then (the commits plus any
+uncommitted changes) into commits that each pass your check:
+
+```console
+$ git log --oneline -3
+fc7358d fix stuff
+91b4d04 asdf
+d0ad624 wip
+$ git carve HEAD~3
+```
+
+The buffer lists the old commits for reference, and every new commit says where its lines
+came from:
+
+```text
+# Re-carving 3 commits since 7edd6a6, plus any uncommitted changes.
+# Their old messages, for reference only (nothing is copied into a commit):
+#   d0ad624 wip
+#   91b4d04 asdf
+#   fc7358d fix stuff
+...
+commit
+  @ a1   src/format.ts:1                  +1 -1  formatBytes  [new]
+  ...
+# from: d0ad624 wip (5 lines), fc7358d fix stuff (6 lines)
+```
+
+```text
+Re-carved 3 commits since 7edd6a6 into 3.
+Created 3 commits on main, each passed `tsc --noEmit -p .` (6 check runs, 0 merges, 5.6s):
+  248d82c Rename fmtBytes to formatBytes
+  4418701 Retry failed fetches with backoff
+  294ead8 Fix off-by-one in parseHeader
+Left in working tree: 2 hunks (src/main.ts:6, src/net.ts:13)
+Undo: git carve --undo
+```
+
+The two `console.log`s the agent committed came back out of history and sit in your working
+tree, uncommitted.
+
+**What rewriting history means here:**
+- **Same final code.** The new tip plus what was left out is byte-identical to before, and
+  carve never writes a file in your working tree.
+- **Exact undo.** `git carve --undo` puts the branch back on the old commits.
+- **Fail closed:**
+  - carve refuses ranges with merge commits;
+  - it refuses commits already on a remote unless you pass `--rewrite-pushed`, because
+    you'd need to force-push. `git carve @{u}` re-carves only what's unpushed.
+- **`git carve main` keeps working after main moves on.** carve uses the merge-base and
+  tells you so.
+
+## From a branch to a stack
+
+GitHub's stacked pull requests went GA in October 2026, but they assume you planned the stack
+before writing code. carve splits what you already have into one, and every layer has
+already passed your check:
+
+```console
+$ git carve main --stack
+...
+Stack on main (3 layers, each passed `tsc --noEmit -p .`):
+  feat-1-rename-fmtbytes-to-formatbytes    14d9833  Rename fmtBytes to formatBytes
+  feat-2-retry-failed-fetches-with-backof  c45e573  Retry failed fetches with backoff
+  feat                                     e7b10b9  Fix off-by-one in parseHeader   (top)
+To open the PRs without gh stack (nothing was pushed):
+  git push -u <remote> feat-1-rename-fmtbytes-to-formatbytes feat-2-retry-failed-fetches-with-backof feat
+  gh pr create --base main --head feat-1-rename-fmtbytes-to-formatbytes --fill
+  ...
+```
+
+**How it works:**
+- **One commit per layer.** Each PR's title is the subject you typed, and carve writes no PR
+  text.
+- **Your branch stays the top layer.** An existing PR keeps its identity.
+- **`gh stack` gets one line.** With the [gh-stack](https://github.com/github/gh-stack)
+  extension installed, carve prints `gh stack init --base main … feat && gh stack submit
+  --auto` instead. `git carve main --stack --submit` runs it for you: it pushes the layers and
+  opens draft PRs.
+- **carve never pushes by itself.**
+- **Graphite:** `gt track <layer> --parent <below>` for each layer, then
+  `gt submit --stack`.
+- **Squash-merge teams are fine.** Each layer squashes on its own, with your subject as the
+  title.
+- **Dependency safety.** A layer that starts using a package travels with the
+  `package.json`, `Cargo.toml` or `go.mod` line that adds it. A layer can't pass locally only
+  because a later layer installed its dependency.
+- **`git carve --undo`** removes the layer branches too, unless you moved them.
+
 ## When your tree doesn't compile
 
 Real working trees are half-finished. If yours fails the check as a whole, carve asks the
@@ -144,15 +235,35 @@ git carve verify: 3 commits, check: tsc --noEmit -p .
 ```
 
 Results are cached by tree, so a second push re-checks nothing. Running the branch above again
-takes a quarter of a second. Install it as a pre-push hook:
+takes a quarter of a second. Commits are checked in parallel (two at a time for TypeScript;
+`git config carve.checkJobs 3` for more, or for your own check).
+
+Install it as a pre-push hook. As a hook, it stops at the first failing commit, because a
+push needs a verdict, not a report:
 
 ```sh
-printf '#!/bin/sh\nexec git carve verify --pre-push\n' > .git/hooks/pre-push
-chmod +x .git/hooks/pre-push
+git carve hooks install      # writes .git/hooks/pre-push; never replaces a hook you already have
 ```
 
-With husky, put `git carve verify --pre-push` in `.husky/pre-push`. In CI (GitHub Actions),
-with the npm package:
+With husky, put `git-carve verify --pre-push` in `.husky/pre-push` (`git carve hooks print git`
+shows the hook).
+
+**Coding agents.** The pre-push hook already stops an agent's bad push. An agent hook also
+explains the refusal to the agent: the failing commit, its errors, and how to fix it. It
+refuses `--no-verify` too. carve prints the setup and never edits your agent's config:
+
+```sh
+git carve hooks print claude   # or cursor, codex: merge the printed JSON into its settings
+```
+
+Agents never write your commit messages. An agent can prepare a re-split from `git carve @{u}
+--plan-only --json` (its `buffer` field), with its suggestions as `# proposed:` comments. You
+open that with `git carve @{u} --plan-file <file> --edit` and write the messages yourself.
+A plan file with messages already in it is refused, unless you opt in for the repository:
+`git config carve.agentMessages true`.
+`agent/skills/git-carve/SKILL.md` teaches an agent this recipe.
+
+In CI (GitHub Actions), with the npm package:
 
 ```yaml
 - uses: actions/checkout@v4
@@ -162,7 +273,7 @@ with the npm package:
 ```
 
 Add `--no-new-errors` if the branch's base already fails the check. Each commit then fails only
-for errors the base did not have.
+for errors the base did not have. `git config carve.noNewErrors true` does the same for the hook.
 
 ## Not just TypeScript
 
@@ -253,15 +364,21 @@ and `cargo install git-carve`. Because the binary is called `git-carve`, git fin
 | Command | What it does |
 |---|---|
 | `git carve` | Plan, check, open your editor once, commit |
+| `git carve <base>` | Re-carve everything since `<base>` (commits and uncommitted changes), for example `git carve @{u}` |
+| `git carve <base> --rewrite-pushed` | Also re-carve commits already on a remote (you will force-push) |
+| `git carve <base> --stack` | Also make one branch per commit: a stack of PRs, each layer already checked; prints the commands to submit it |
+| `git carve <base> --stack --submit` | Submit the stack with `gh stack` (pushes the layers, opens draft PRs) |
 | `git carve --plan-only` | Print the checked plan; commit nothing |
-| `git carve --plan-file plan.txt` | Use a filled-in plan instead of the editor |
+| `git carve --plan-file plan.txt --edit` | Start the editor from a prepared plan (an agent's `# proposed:` lines, say) and write the messages |
 | `git carve --check '<cmd>'` | Use your own check (default: the language's, above) |
 | `git carve --no-check` | Skip checking; the summary says the commits are unverified |
 | `git carve --no-new-errors` | When HEAD already fails the check: no commit may add a new error |
 | `git carve --undo` | Restore the state before the last run |
 | `git carve --json` | The plan and its evidence as JSON |
 | `git carve --clean` | Remove the scratch worktree and caches |
-| `git carve verify [RANGE]` | Check every commit in a range (default: what the upstream lacks) |
+| `git carve verify [RANGE]` | Check every commit in a range (default: what the upstream lacks); `--fail-fast` stops at the first failure |
+| `git carve hooks install` | Check every push first (git's pre-push hook) |
+| `git carve hooks print claude` | Print the agent hook that explains refused pushes (also `cursor`, `codex`) |
 
 `git config carve.check '<cmd>'` sets a per-repository default check.
 
@@ -287,6 +404,10 @@ finish, run `git carve`, review the plan, and write the messages yourself.
 - Commit hooks do not run on carve's commits. Put your lint in `--check` instead, and it runs
   on every commit.
 - A debug line inside a larger changed region cannot be separated from it.
+- A re-carve makes new commits: they are yours, with today's date. The old commits' authors and
+  dates are not kept (their trailers are listed in the buffer for you to copy).
+- When a re-carved range adds a dependency, every commit is checked against your current
+  `node_modules`, so a commit that uses the package before the one that adds it can still pass.
 - Outside TypeScript, carve reads code by keywords and indentation, not a full parser. Two files
   are linked by a name only when exactly one other changed file defines it.
 

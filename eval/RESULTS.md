@@ -75,6 +75,61 @@ With leave-one-repository-out, the rung-1 recipe beats code-only on 2–4-commit
 [−0.053, +0.019]). The verdict above rests on 2–4-commit windows. Real messy trees can be
 larger, which is one more reason E7 decides.
 
+## Range carves inherit these numbers (D47, dev corpora only)
+
+`git carve <base>` re-carves committed work. `git carve eval range-check` runs each window
+twice, code-only:
+- **the eval path:** the window materialized as a dirty tree on its base;
+- **the product path:** the window's last commit checked out, the injected debug lines
+  applied as uncommitted edits, then `git carve <base>`.
+
+It compares the plans byte for byte. This is never run on the locked test split.
+
+| Corpus | Windows | Identical | Expected | Mismatched | Refused | Median plan ms (eval / range) |
+|---|---|---|---|---|---|---|
+| `train-manifest-v2` (TypeScript) | 300 | 295 | 4 | 0 | 1 | 120 / 171 |
+| `polyglot-manifest` (Python, Go, Rust) | 200 | 199 | 1 | 0 | 0 | 78 / 118 |
+
+- **"Expected" windows** add committed binary assets. Their atoms are identical, but range
+  mode keeps those files in history while the eval path, which sees them as untracked, leaves
+  them out (D47 rule 3).
+- **The refusal** is `carve.maxAtoms` on both paths.
+- **The plan-time difference is the `# from:` attribution.** Without it
+  (`GIT_CARVE_DEV_NO_ATTRIBUTION=1`) the median is 103 / 110 ms on 50 windows.
+- **So the numbers above (code-only test BCubed 0.743) apply to range carves as they stand.**
+
+## B5 dependency binds (D48, dev corpora only)
+
+Code-only `eval run`, with B5 on and off (`GIT_CARVE_DEV_DISABLE_EDGES=B5`):
+
+| Corpus | Windows | Plans changed | BCubed F1 off → on |
+|---|---|---|---|
+| tune split (TypeScript) | 72 | 0 | 0.8016 → 0.8016 |
+| `train-manifest-v2` (TypeScript) | 389 | 0 | 0.7394 → 0.7394 |
+| `polyglot-manifest` (Go, Rust, Python) | 584 | 17 | 0.7831 → 0.7859 |
+
+The TypeScript corpora barely change manifests: the corpus builder rejects lockfile windows.
+In one Go window, many files start using a newly required module, and the plan goes from 10
+commits to 2: B5's sound-not-complete trade-off.
+
+After the review fixes of 2026-10-14 (each dependency's line is looked up inside its own
+section, and only import syntax counts), every number above is unchanged.
+
+## Speed: parallel checks (D51, tune split, tier B)
+
+`git carve eval speed`: 9 windows, each carved at 1, 2 and 3 jobs. The ratio is the verify
+step's wall time over one cold `tsc` of the final tree.
+
+| Jobs | Cold median | Cold p90 | Warm median | Warm p90 | Plans differing |
+|---|---|---|---|---|---|
+| 1 | 3.29 | 5.43 | 3.05 | 4.71 | — |
+| 2 | 2.09 | 4.45 | 2.38 | 3.21 | 0 |
+| 3 | 2.43 | 3.18 | 2.14 | 2.77 | 0 |
+
+- **The pre-registered target (median ≤ 2.0, p90 ≤ 3.0) is not met.**
+- The default is 2 jobs.
+- **Cold** means no build info; **warm** means each worker's build info starts at HEAD.
+
 ## Pending: E7 (real trees; steps 5 and 6)
 
 Capture 10–15 real messy trees while working:

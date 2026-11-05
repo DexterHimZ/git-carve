@@ -1693,3 +1693,346 @@ passes your check before you push. You write the messages."
 
 **Metric:** a second use within 14 days per installer, not stars. Below 30%, suspect speed
 first, then editor friction.
+
+## D47. `git carve <base>`: re-carve committed work (D46 phase 1, built 2026-10-13)
+
+**Process.** The design was written from the code and reviewed before building. The
+review found:
+- one product bug: committed large or binary files would have left the history;
+- six missed behaviors;
+- answers to the open questions;
+- a 9-step plan that keeps the build green at every step.
+
+Then it was built. The design record is `docs/design/carve-range.md`.
+
+**Decisions.**
+1. **The snapshot gets a base next to its head** (SPEC §5.6).
+   - Trees and parents use the base; the compare-and-swap, the race guard and undo use the
+     head. Plain carve has base = head.
+   - About ten call sites; `take()` is unchanged.
+2. **Building the snapshot (`take_since`).** One `diff-tree --raw` over `base..HEAD`, unioned
+   with `git status`.
+   - Only dirty paths are hashed: committed content is already in repository form, so
+     autocrlf and filters cannot disturb it.
+   - Paths whose working tree equals the base drop out.
+   - A submodule inside the range is refused as a precondition (it would otherwise reach
+     `blob_sizes` as an internal error).
+3. **`FileSnap.in_head`.** Only files absent from HEAD are left out by default for being
+   large or binary (D-leave). Without this, a committed 3 MB asset would vanish from the
+   re-carved history and reappear untracked.
+4. **Base resolution.**
+   - `<base>`, `<base>..` and `<base>..HEAD`; any other tip is refused.
+   - A non-ancestor base with exactly one merge-base uses it, with a notice. This is how
+     `git carve main` keeps working after main moves.
+   - Merges are refused.
+   - Commits reachable from any remote-tracking ref are refused unless `--rewrite-pushed`.
+     The refusal names the remote branch and suggests `git carve @{u}`.
+   - There is no `--rewrite-others` flag: agents commit as themselves, and authorship is
+     not preserved by design.
+   - Old author dates are not kept: the mapping is many-to-many.
+5. **A net-empty range** with a clean tree is refused with the `git reset --soft` hint. "Nothing to
+   carve" stays for a clean plain carve.
+6. **Attribution, for display only.**
+   - Each block's `# from:` line comes from one `git blame --porcelain --contents` per changed
+     file over the range, with boundary commits tracked per commit (porcelain prints the
+     mark once).
+   - Whole-file atoms name the range commits that touched the path.
+   - Deletion-only regions are not attributed.
+   - Attribution never enters grouping; an F8 "same old commit" edge needs the
+     pre-registered experiment in the design doc.
+7. **Wording.**
+   - When the base fails the check, messages say "the base", not "HEAD".
+   - `verify` now says "1 of N commits does not pass" (singular fixed) and hints
+     `git carve @{u}`.
+   - The old messages' trailers are listed to copy.
+
+**Measured.**
+- **Tests:** 217 pass (35 new). That includes the property test over random histories and
+  bases, the safety cases, an insta snapshot of the buffer, and a CLI-vs-eval equivalence
+  test.
+- **Equivalence on real windows** (`git carve eval range-check`, dev corpora only, code-only):
+
+  | Corpus | Windows | Identical | Expected | Mismatched | Refused |
+  |---|---|---|---|---|---|
+  | `train-manifest-v2` (TypeScript) | 300 | 295 | 4 | 0 | 1 |
+  | `polyglot-manifest` (Python, Go, Rust) | 200 | 199 | 1 | 0 | 0 |
+
+  - The "expected" windows add committed binary assets (icons, images), which range mode
+    keeps by rule 3. Their atoms are identical in both paths.
+  - The refusal is `carve.maxAtoms` (600 regions) on both paths.
+  - **So range mode inherits the locked evaluation numbers** (test BCubed 0.743 code-only);
+    no re-measurement on test.
+- **Latency:**
+  - median plan time 120 ms (eval path) vs 171 ms (range path) over 300 TypeScript windows,
+    and 78 vs 118 ms over the polyglot windows;
+  - without attribution (`GIT_CARVE_DEV_NO_ATTRIBUTION=1`), 103 vs 110 ms (+7%, within the
+    design's 10% budget);
+  - attribution costs about 50–75 ms per carve, which is negligible next to any check run,
+    and is kept.
+
+**Not yet measured:** my real agent branches, which is the design's correctness
+check on real use. Run `git carve @{u} --plan-only` (then one committed run and
+`git carve --undo`) on three of them.
+
+## D48. `git carve <base> --stack`: a checked stack of PRs (D46 phase 2, built 2026-10-13)
+
+**Process.** It was designed after verifying `gh stack` from GitHub's docs and the
+gh-stack source (`cmd/init.go`, `cmd/submit.go`, `skills/gh-stack/SKILL.md`). Then it was built.
+Design record: `docs/design/stack.md`.
+
+**Facts that shaped it.**
+- `gh stack init --base T b1 … bn` adopts existing branches.
+- `gh stack submit --auto` titles a PR with the commit subject **only when the branch has
+  exactly one commit**.
+- There is no `split` (gh-stack#508). GitHub's own skill says to plan stacks before writing
+  code.
+
+**Decisions.**
+1. **One commit per layer**, so every PR title is a subject the human wrote. carve passes no
+   `--title` or `--body`; gh fills the body from the repository template or the commit body.
+   Multi-commit layers and a `stack` marker in the buffer were cut.
+2. **Layers.** Layers 1..N−1 are new branches `<branch>-<k>-<slug>`, never with `/`. Layer N
+   is the current branch, moved by the existing compare-and-swap, so a re-carved PR branch
+   keeps its PR.
+3. **Creation and undo.**
+   - Each layer is created with a null-old-value `update-ref`, after the race guard and
+     before the main CAS.
+   - If that CAS fails, the layers are deleted again.
+   - `UndoRecord.stack` lists them (`serde(default)`, so older records still parse).
+   - Undo deletes the unmoved layers and names the moved ones.
+4. **Refusals:**
+   - detached HEAD;
+   - leftover `<branch>-<k>` / `<branch>-<k>-*` branches, checked before the editor opens
+     (the hint points at `gh stack modify|rebase` or `git branch -D`);
+   - exact name collisions after editing (nothing is committed; the messages are kept).
+5. **Submitting.**
+   - **By default carve prints** `gh stack init … && gh stack submit --auto`, or, without the
+     extension, `git push -u` and one `gh pr create --base <below> --head <layer> --fill`
+     per layer.
+   - **`--submit`** runs gh stack after a local preflight (gh with the extension, a remote,
+     a known trunk). On failure it exits **6**; the retry commands are idempotent.
+   - carve never pushes by itself.
+6. **Trunk and remote.** The trunk is the local branch, the remote-tracking branch without
+   its remote, or the unique branch at the base commit; otherwise a placeholder. The remote
+   is `remote.pushDefault`, else `origin`.
+7. **JSON.**
+   - `--plan-only --json --stack` lists the planned layers by name prefix (names take the
+     typed subjects).
+   - A full run with `--json` prints a run report: version, commits, left hunks, verified
+     check, range, the stack with layers, and the submit result. With `--submit`, gh's
+     output goes to stderr so stdout stays valid JSON.
+8. **B5, dependency binds (the soundness gap from D47).**
+   - An atom that starts using a dependency the manifest adds (npm, Cargo, Go) binds to that
+     manifest line; removals bind the same way.
+   - New code files are read through their parsed imports.
+   - Python is left out (package and module names differ), and so is a brand-new manifest.
+   - It is sound, not complete.
+   - Ablation: `GIT_CARVE_DEV_DISABLE_EDGES=B5`.
+
+**Measured.**
+- **Tests:** 250 pass. That includes `tests/stack.rs` (21: layers, names, refusals, exact undo,
+  a CAS race leaving no layer, the printed commands, and `--submit` against a stub gh with
+  exit 6 and JSON) and `tests/manifest.rs` (6).
+- **B5 on the dev corpora:**
+  - tune (TypeScript): 0 of 72 plans changed;
+  - `train-manifest-v2`: 0 of 389;
+  - polyglot: 17 of 584, with BCubed 0.7831 → 0.7859. One Go window went from 10 commits to
+    2, because many files start using a new module.
+
+**Usefulness.** The weekly version is `git carve main --stack` plus one pasted line. The
+risks the review flagged are tracked:
+- **slow checks:** phase 4;
+- **branch litter after merge:** `gh stack sync --prune`;
+- **folding review fixes into a layer:** deferred, verified absorb.
+
+**Result review (2026-10-14).** The review reproduced 5 findings; all are fixed, each with
+a regression test:
+1. **Major.** `git carve @{u} --stack` on `feat` tracking `origin/feat` used `feat` as its own
+   trunk, and `--submit` would have run `gh stack init --base feat … feat`. The trunk is now
+   never the top branch.
+2. **Major.** B5 took a package.json dependency's line from the first matching key anywhere,
+   so a `scripts` entry with the same name (`vitest`, `jest`, `eslint`) left the import
+   unbound. That is the CI failure B5 exists to prevent. The lookup is now scoped to the
+   section's braces.
+3. **Minor.** B5 bound comment lines such as `// moved away from "axios"`. Only import syntax
+   counts now.
+4. **Minor.** Undo after a push said nothing about the remote copies. It now names them.
+5. **Minor.** A re-carve that reuses pushed layer names said nothing. It now says pushing
+   replaces them.
+
+Also noted: a crash between creating the layers and the main CAS leaves layer branches with
+no undo record. The next run refuses with the `branch -D` hint, so no data is lost. Accepted.
+
+**The biggest gap the review named is iterating on a split.** Re-carving today means deleting the
+layers, retyping the messages and force-pushing again. A re-carve that adopts the existing
+`<branch>-<k>` layers (CAS-moves them, so their PRs survive) is on ROADMAP.md as the next
+stack feature.
+
+## D49. Agents may draft commit messages; a human authors them, unless the repository opts in (ruling, 2026-10-13)
+
+**The question** (pending since D46): when an agent drives carve, may it fill the message lines
+of the plan file?
+
+**Round 1, allow.** Typing five messages for an agent's work is the friction D46's metric
+warns about. The agent knows the intent. And carve cannot tell who wrote a `--plan-file`.
+
+**Round 2, forbid.** "Refuses to write your commit messages" dissolves if "but your agent
+will". Messages are what people distrust most, and a drafted message carries no provenance.
+
+**Round 3, the synthesis.**
+- **carve writes no message text, ever, trailers included.** Non-negotiable 1 is unchanged.
+- **The default agent recipe:**
+  1. the agent runs `git carve @{u} --plan-only --json`;
+  2. it writes its proposals as `# proposed: …` comment lines under each `commit` line;
+  3. the human runs `git carve @{u} --plan-file plan.txt --edit`.
+
+  The parser drops comments, so a proposal becomes a message only through a human keystroke.
+  An untouched file aborts with "empty message", and that is enforced by code, not by
+  prompt.
+- **Opt-in agent messages.** `git config carve.agentMessages true` lets an agent write the
+  message lines itself.
+- **Auditability, either way:**
+  - `UndoRecord.plan_source` (`editor` or `file`);
+  - a `(plan file)` reflog suffix;
+  - a summary line saying the plan came from a file.
+
+Implemented in phase 3 (`docs/design/agent-gate-speed.md`).
+
+**Enforcement gap (result review, 2026-10-14).** `--plan-file` already takes filled
+message lines with no editor, so today an agent can skip `# proposed:` entirely. Phase 3
+closes this:
+- `--plan-file` without `--edit` refuses a plan whose message lines are not empty, unless
+  `carve.agentMessages` is set. The refusal names both ways forward.
+- A human who writes plan files by hand passes `--edit` (a review in the editor) or sets the
+  config.
+- `plan_source` records which path ran.
+
+## D50. The push gate: git's pre-push hook enforces, agent hooks explain (D46 phase 3, built 2026-10-14)
+
+**The question:** how does "every commit passes" reach the moment it matters? The moment is a
+push, often from an agent.
+
+**Round 1, agent hooks only.** Claude Code, Cursor and Codex can veto a tool call before it
+runs. A hook on `git push` sees the agent at the decisive moment, and can tell it how to fix
+the problem.
+
+**Round 2, but agent hooks are not enforcement.**
+- They are per-agent and per-user, and only best-effort: an alias or a script hides the push.
+- Aider has no hook API.
+- A human pushes too.
+
+git's own pre-push hook covers all of them, and `verify --pre-push` exists (D44).
+
+**Round 3, the synthesis.**
+- **Enforcement is `.git/hooks/pre-push` running `git-carve verify --pre-push`.**
+  `git carve hooks install` writes exactly that one file:
+  - only on request;
+  - never over a foreign hook;
+  - never into a `core.hooksPath` another tool manages (then it says what to add);
+  - `hooks uninstall` removes only its own.
+
+  A missing `git-carve` binary skips the hook with a warning rather than blocking every push.
+- **Agent hooks are the courtesy layer.**
+  - `git carve hooks run claude|cursor|codex` reads the event and finds a `git push` in the
+    command line, best-effort: quotes are honored, and `&&`, `;` and `|` separate commands.
+  - It runs `verify --fail-fast` on what the push would publish, and denies with the failing
+    commit, its errors and the fix (fix the code, or the D49 recipe).
+  - It always denies the bypasses: `--no-verify`, and `-c core.hooksPath=…`.
+  - Any carve error allows the push with a note (it fails open), because the pre-push hook
+    is what fails closed.
+- **carve never writes `.claude/`, `.cursor/` or `.codex/` files.** `git carve hooks print
+  <agent>` prints the snippet, and the user merges it. Agent configuration is the user's, and
+  its format changes faster than carve does.
+- **Formats verified against each tool's documentation** (`docs/design/agent-gate-speed.md`;
+  Codex re-checked 2026-10-14):
+  - Claude Code and Codex: `PreToolUse` on `Bash`, `tool_input.command`, deny with exit 2 and
+    the reason on stderr;
+  - Cursor: `beforeShellExecution`, `{permission, user_message, agent_message}`.
+
+  Claude Code's best-effort `if` field is left out: the gate re-inspects the command anyway,
+  and a non-push exits in milliseconds.
+- **The JSON contract for agents** is `version: 1` on `verify --json` and on `--plan-only
+  --json`. Within a version, fields are only added. `--plan-only --json` carries `buffer`,
+  the exact text `--plan-only` prints, so an agent can save it and add `# proposed:` lines.
+- **The plugin directory is cut** (the phase 2 review) to one `agent/skills/git-carve/SKILL.md`
+  carrying the D49 recipe.
+
+**D49 is enforced in code:**
+- `--plan-file` without `--edit` refuses filled messages unless `carve.agentMessages` is true;
+- `--edit` seeds the editor with the plan file;
+- `UndoRecord.plan_source` is `editor`, `plan-file+edit` or `plan-file`;
+- a `plan-file` run's reflog entry ends in `(plan file)`, and its summary says so.
+
+## D51. The speed gate: fail-fast verify and parallel checks (D46 phase 4, built 2026-10-14)
+
+**The question:** how close can a carve get to "about 2× one check"?
+
+**Built:**
+- **`verify --fail-fast`** (implied by `--pre-push`): stops at the first failing commit. The
+  D1 probe runs only when every commit passed.
+- **Parallel checks:**
+  - `Checker::check_many` checks up to `jobs` trees at once, in worker worktrees
+    `<git-path carve>/w<k>/scratch`. Like the scratch worktree, each is registered under
+    `.git/worktrees/` (D15's wording covers one; this is the same kind of write, flagged to
+    me).
+  - Base and final share the first round. Spare workers check prefixes ahead of need. The
+    probe trees share rounds with the remaining prefixes.
+  - A tree's outcome depends only on the tree, so the order of decisions and the plan are
+    unchanged.
+  - tsc build info is named by project path (it was named by index, so a different project
+    set reused the wrong file).
+
+**Benchmark:**
+- **Protocol** (`eval speed`, pre-registered in `docs/design/agent-gate-speed.md`):
+  - the tune split, tier B, 9 windows;
+  - an untimed warm-up remembers the probe verdicts;
+  - ratio = the verify step's wall time / one cold standalone check of the final tree.
+- **Cold vs warm** was not pre-registered. Both are reported, and cold is primary:
+  - **cold:** no build info;
+  - **warm:** every worker's build info starts at HEAD.
+
+| Jobs | Cold median | Cold p90 | Warm median | Warm p90 | Plan differences |
+|---|---|---|---|---|---|
+| 1 | 3.29 | 5.43 | 3.05 | 4.71 | — |
+| 2 | 2.09 | 4.45 | 2.38 | 3.21 | 0 |
+| 3 | 2.43 | 3.18 | 2.14 | 2.77 | 0 |
+
+**Verdict: the target (median ≤ 2.0, p90 ≤ 3.0) is not met.**
+- Parallelism is a real gain: median wall time drops from 18.1 s to 12.1 s cold, and from
+  13.1 s to 8.6 s warm.
+- On the demo, a cold carve drops from 5.4 s to 2.5 s at 3 jobs, and a cached re-run takes
+  0.31 s (target ≤ 0.5 s, met).
+- The remaining gap is structural: N groups need at least N + 1 runs (base, final, N − 1
+  prefixes).
+- The first run in each worker is cold, and parallel tsc runs contend.
+
+**Default jobs = 2** (at most half the CPUs).
+- 3 is better warm but worse cold, the 9 windows are noisy, and each extra tsc costs its
+  full memory.
+- `git config carve.checkJobs 3` is documented.
+
+**Next levers (not built):**
+- skip the base check when a verify already cached HEAD;
+- pre-warm the workers after a carve, so the next one starts warm.
+
+The result review agrees with the verdict and the default. It names the first lever: the
+benchmark re-checks HEAD in every window, which a carve after a carve or a verify would find
+cached. Re-run with the base cached before building anything else.
+
+**Result review of D50/D51 (2026-10-14).** The review reproduced 4 findings; all are
+fixed, each with a regression test:
+1. **Critical.** git exports `GIT_DIR` to a pre-push hook in a linked worktree. The scratch
+   worktrees' `read-tree -u` followed it and rewrote the user's index, breaking
+   non-negotiable 2. Every git call now drops inherited `GIT_DIR`, `GIT_WORK_TREE`,
+   `GIT_INDEX_FILE`, `GIT_COMMON_DIR` and `GIT_PREFIX` (`src/git.rs`). carve finds the
+   repository from each handle's directory.
+2. A pushed-over remote commit that was never fetched made `remote..local` fail, blocking
+   the push on a git error. It now falls back to `local --not --remotes`.
+3. The agent gate read shell redirections (`2>&1`, `> log`) as revisions, and failed open.
+   They are dropped now.
+4. `--plan-file --edit` with `GIT_EDITOR=true` committed an agent's filled messages. Seeded
+   messages now become `# proposed:` comments unless `carve.agentMessages` is set.
+
+Plus the adoption gap the review named: in a repository whose HEAD already fails the check,
+the first push after `hooks install` was blocked. `carve.noNewErrors` makes `verify`, the
+pre-push hook and the agent gate tolerate the base's errors (D43). The refusal names it.

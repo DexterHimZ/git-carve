@@ -143,6 +143,15 @@ Refuse with a clear message and exit code 2 if any of these hold:
 - There is nothing to carve.
 - Size limits are exceeded: more than `carve.maxAtoms` atoms (default 400) or more than
   200 changed paths.
+- Range carves (`git carve <base>`, §5.6) refuse more:
+  - a base that does not resolve, or that shares no history (or several merge bases) with
+    HEAD;
+  - a tip other than HEAD;
+  - a merge commit in `base..HEAD`;
+  - commits already on any remote-tracking ref, unless `--rewrite-pushed`;
+  - a submodule pointer changed inside the range;
+  - a range that changes nothing net when the working tree is clean (hint:
+    `git reset --soft <base>`).
 
 ### 5.2 Snapshot
 
@@ -157,6 +166,57 @@ Refuse with a clear message and exit code 2 if any of these hold:
 
 Paths with a `filter` attribute (`git check-attr filter -- <path>`), such as LFS, become
 whole-file atoms.
+
+### 5.6 Range carve: `git carve <base>` (DECISIONS.md D47)
+
+`git carve <base>` re-carves everything since `<base>`: the commits in `<base>..HEAD` plus
+any uncommitted changes, into commits that each pass the check. Everything else in this
+spec applies unchanged.
+
+**The snapshot has a base and a head.**
+- The **base** (the resolved `<base>`) is what new commits are parented on and what atoms
+  are diffed against.
+- The **head** (HEAD) is what the compare-and-swap (§10.2), the race guard (§10.3) and undo
+  (§10.5) check.
+- A plain `git carve` has base = head.
+
+**Resolving the base.**
+- `<base>`, `<base>..` and `<base>..HEAD` are accepted.
+- If `<base>` is not an ancestor of HEAD but has exactly one merge-base with it, that
+  merge-base is used, with a notice. This is how `git carve main` keeps working after `main`
+  moves.
+
+**Building the snapshot.** The changed paths are `git diff-tree -r --raw --no-renames
+base HEAD` unioned with `git status`.
+- For each path, the base side is the entry at the base.
+- The new side is the hashed working-tree content if the path is dirty, otherwise HEAD's
+  entry. Clean committed paths are never re-hashed, so `core.autocrlf` and clean filters do
+  not touch committed content.
+- A path whose working tree matches the base has no net change and drops out.
+
+**Leaving files out by default.** A large or binary new file is left out by default only if
+it is not in HEAD (truly untracked). A committed asset stays in the new history.
+
+**What the user sees.**
+- The plan buffer header lists the re-carved commits as `#` comments (at most 20 subjects,
+  then "and N more"), the distinct authors when there are several, and the old messages'
+  trailers to copy.
+- Each block gets a `# from:` line naming the old commits its lines came from (computed
+  with `git blame --contents` over the range; display only, it never affects grouping).
+- `--json` adds a `range` block with `base`, `merge_based`, the `commits`, and per-atom
+  `sources`.
+- The summary starts "Re-carved K commits since <base> into N."
+- The reflog line is "carve: re-carved since <base> into N commits".
+- When the base fails the check, messages say "the base", not "HEAD".
+
+**Guarantees.** All of §5.5 and §13 hold:
+- the new tip's tree plus the left-out atoms equals the old working tree;
+- working-tree files are never written;
+- `--undo` restores the old tip exactly;
+- debug-only lines that were committed in the range come out of history and stay in the
+  working tree as uncommitted changes.
+
+The check's configuration (for example `tsconfig.json`) must exist at the base.
 
 ### 5.3 Atoms
 
@@ -320,6 +380,22 @@ at M5 (D26). F2 pairs are the judge's first veto candidates (§7.3).
 atoms (every changed line is inside an import statement; they would chain unrelated features
 through a shared import line, DECISIONS.md D5). They join
 groups only through hard binds or the post-passes.
+
+**B5, dependencies (DECISIONS.md D48).** An atom whose added lines start using a
+dependency that a changed manifest adds (`package.json` dependency maps, `Cargo.toml`
+`[*dependencies]`, `go.mod` `require`) binds to the manifest atom holding that line. An atom
+whose removed lines stop using a removed dependency binds to the line that removes it.
+- New code files are read through their parsed imports.
+- A dependency's line is looked up inside its own section (a `scripts` key with the same name
+  does not count).
+- Only real uses count: comment lines never do, and in JavaScript only import syntax does
+  (`import`/`export … from`, a `} from` closing a multi-line import, `require(`, `import(`).
+- A brand-new manifest, and Python, are not covered (Python's package and module names
+  differ).
+- It is sound, not complete: it can make one larger commit. Several dependencies added in one
+  manifest hunk (and the lockfile, through B2) bind every user of any of them into one commit.
+  That is lockfile atomicity, not a false bind.
+- Ablation: `GIT_CARVE_DEV_DISABLE_EDGES=B5`.
 
 ### 6.4 Grouping algorithm
 
@@ -540,6 +616,15 @@ came from real repositories and current project templates (checked 2026-09-23):
   the user's `./target`. The first run is a full build. Say so.
 - If the check needs untracked files that exist only in the main worktree (such as `.env`),
   the base precheck fails. The error message must suggest adding them to `carve.link`.
+- **Parallel workers (DECISIONS.md D51).**
+  - Up to `jobs` trees are checked at once. Worker 0 is the scratch worktree; worker k is
+    `<git-path carve>/w<k>/scratch`, created the same way on first use, with the same links.
+  - The default TypeScript check writes its build info to `../tsbuildinfo/` (next to each
+    worktree), so workers never share it. Each project's build info is named by its path.
+  - `jobs` is `carve.checkJobs` when set, else 2 for the default TypeScript check (at most
+    half the CPUs), else 1. Cargo's shared target directory, for example, is not safe to
+    share without asking.
+  - `--clean` removes the workers too.
 
 ### 8.3 Order of runs
 
@@ -563,6 +648,14 @@ came from real repositories and current project templates (checked 2026-09-23):
 4. **Prefixes**: the tree after groups 1..k for k = 1..N−1, in increasing k, so an
    incremental checker sees one group added per run (the tree after group N is the final
    tree, already checked).
+
+With parallel workers (§8.2, D51), the order of decisions stays exactly as above:
+- base and final share the first round, and spare workers in that round check the first
+  prefixes ahead of need;
+- the probe trees share rounds with the remaining prefixes;
+- every result is cached, so the steps above read them back in order.
+
+A tree's outcome depends only on the tree, so plans are identical for every job count.
 
 Cache results by `(tree oid, check command, link set)` in `<git-path carve>/checks.json`.
 Identical trees are never checked twice, including across plan edits and re-runs.
@@ -694,7 +787,8 @@ hint: "delete the next 'commit' line to merge them."
 
 ### 10.1 Creating commits
 
-For each group in order: `git commit-tree <tree_k> -p <parent> -F <msgfile>`. Add `-S` if
+For each group in order: `git commit-tree <tree_k> -p <parent> -F <msgfile>`. The first
+parent is the snapshot's base: HEAD, or the range's base (§5.6). Add `-S` if
 `git config --bool commit.gpgsign` is true. Author and committer come from normal git
 config and environment.
 
@@ -707,6 +801,44 @@ mechanism.
 - Detached HEAD: `git update-ref --no-deref -m … HEAD <new> <old>`.
 - If the CAS fails because the ref moved, abort. The objects are harmless and dangling
   (gc removes them). Exit 4.
+- In a range carve the expected old value is still HEAD (the old tip), never the base.
+
+### 10.2.1 Stack output: `git carve <base> --stack` (DECISIONS.md D48)
+
+**Layers.** One commit per layer, so `gh stack submit --auto` titles each PR with the
+human's subject.
+- Layers 1..N−1 are new branches `<branch>-<k>-<slug>`. The slug is the subject lowercased
+  to ASCII letters and digits joined by `-`, at most 32 characters; with an empty slug the
+  name is `<branch>-<k>`.
+- Layer N is the current branch, moved by the usual compare-and-swap.
+- Each layer branch is created with `update-ref <ref> <commit_k> <null-oid>`: after the race
+  guard, before the main CAS, and only if it does not exist. If the main CAS fails, the
+  layers are deleted again.
+
+**Refusals.**
+- Detached HEAD.
+- Branches `<branch>-<k>` or `<branch>-<k>-*` left by an earlier stack (refused before the
+  editor opens).
+- An exact name collision after editing (nothing is committed; the messages are kept).
+
+**No new check runs:** layer k's tree is prefix tree k, already checked (§8.3).
+
+**Submitting.** carve prints the commands: `gh stack init --base <trunk> <layers…> <branch> &&
+gh stack submit --auto` when the gh-stack extension is installed, otherwise `git push -u`
+and one `gh pr create --base <below> --head <layer> --fill` per layer.
+- `--submit` runs the gh-stack commands. First, a local preflight checks gh with the
+  extension, a remote and a known trunk.
+- On failure it exits 6 with the retry commands.
+- carve passes no PR title or body, and never pushes by itself.
+- The trunk is `<base>` when it is a local branch, `origin/x` / `@{u}` becomes `x`, or the
+  unique branch at the base commit. It is never the top branch itself: `@{u}` on `feat`
+  tracking `origin/feat` gives no trunk (`<trunk>` is printed, and `--submit` refuses). The
+  remote is `remote.pushDefault`, else `origin`.
+- When a layer's name already exists on a remote, carve says that pushing replaces it.
+
+**Undo** deletes each layer branch that still points where carve left it, and names any
+that moved. carve never touches remotes: when layers were pushed, undo says the remote
+branches (and any pull requests) are still there.
 
 ### 10.3 Race guard
 
@@ -755,7 +887,7 @@ The reflog keeps everything regardless.
 ## 11. CLI
 
 ```
-git carve [--check <cmd> | --no-check] [--no-new-errors] [--no-judge | --judge] [--plan-only | --plan-file <path>] [--json] [-v]
+git carve [<base>] [--rewrite-pushed] [--check <cmd> | --no-check] [--no-new-errors] [--no-judge | --judge] [--plan-only | --plan-file <path>] [--json] [-v]
 git carve --undo
 git carve --clean
 git carve eval build [--sources eval/sources.json] [--out <manifest>] [--train]   (hidden dev subcommands,
@@ -765,20 +897,30 @@ git carve eval run [--corpus <manifest>] [--arm code|judge] [--split tune|test] 
 
 | Flag | Meaning |
 |---|---|
+| `<base>` | Re-carve everything since this commit: `base..HEAD` plus uncommitted changes (§5.6, DECISIONS.md D47). For example `main`, `HEAD~3`, `@{u}` |
+| `--rewrite-pushed` | Allow a range carve over commits already on a remote (a force-push will be needed) |
+| `--stack` | With `<base>`: one branch per new commit but the last (§10.2.1), and the commands that submit them as stacked PRs |
+| `--submit` | With `--stack`: run `gh stack init` and `gh stack submit --auto` after committing; exit 6 if submitting fails |
 | `--check <cmd>` | Check command (overrides config and default) |
 | `--no-check` | Skip verification; summary says "unverified" |
-| `verify [RANGE] [--pre-push] [--no-new-errors] [--check CMD] [--json]` | Check every commit of a range (default `@{upstream}..HEAD`, else commits on no remote), oldest first, in the scratch worktree; exit 3 if any fails (DECISIONS.md D44) |
+| `verify [RANGE] [--pre-push] [--fail-fast] [--no-new-errors] [--check CMD] [--json]` | Check every commit of a range (default `@{upstream}..HEAD`, else commits on no remote), oldest first, in the scratch worktree; exit 3 if any fails (DECISIONS.md D44). `--fail-fast` (implied by `--pre-push`, D51) stops at the first failing commit and reports how many were not checked; the D1 probe then runs only when every commit passed. `--json` carries `version: 1`; fields are only added within a version |
 | `--no-new-errors` | When HEAD already fails the check, commit only what adds no new error to HEAD's (DECISIONS.md D43); the buffer and summary say so |
 | `--no-judge` / `--judge` | Force code-only or judge mode (default: `carve.judge`, which defaults to `none`) |
 | `--plan-only` | Compute and verify, print the plan to stdout, commit nothing |
-| `--plan-file <path>` | Read a filled plan buffer from a file instead of opening the editor (§9.1) |
-| `--json` | Machine-readable plan and metrics (used by eval) |
+| `--plan-file <path>` | Read a filled plan buffer from a file instead of opening the editor (§9.1). Its message lines must be empty unless `carve.agentMessages` is true (DECISIONS.md D49); the run records `plan_source` in `undo.json`, the reflog entry ends in `(plan file)`, and the summary says the messages came from the file |
+| `--edit` | With `--plan-file`: open the editor on the plan file, so the human reviews it and writes the messages (D49) |
+| `hooks install` / `hooks uninstall` | Write or remove `.git/hooks/pre-push` running `git-carve verify --pre-push`; never over a foreign hook or into a `core.hooksPath` (D50) |
+| `hooks print claude\|cursor\|codex\|git` | Print the hook setup to merge by hand; carve never writes agent config files (D50) |
+| `hooks run claude\|cursor\|codex` | Run as an agent's pre-tool hook: deny a `git push` whose commits fail the check (fail-fast), and any push that skips the pre-push hook; allow on any carve error (D50) |
+| `--json` | Machine-readable plan and metrics (used by eval). `version: 1`; within a version fields are only added. With `--plan-only` it includes `buffer`, the exact text `--plan-only` prints (D50) |
 | `--undo` | Undo the last carve (§10.5) |
 | `--clean` | Remove the scratch worktree, caches, and the build target dir |
 | `-v` | Print check commands, timings, and judge decisions with probabilities |
 
 Config keys: `carve.check`, `carve.link` (multi-valued), `carve.judge` (`none|laya`),
-`carve.judgeTimeout`, `carve.checkTimeout`, `carve.maxAtoms`.
+`carve.judgeTimeout`, `carve.checkTimeout`, `carve.maxAtoms`, `carve.checkJobs` (parallel
+check workers, §8.2), `carve.agentMessages` (bool; a plan file may carry messages, D49), `carve.noNewErrors`
+(bool; `verify`, the pre-push hook and the agent gate act as with `--no-new-errors`, D50).
 
 | Exit code | Meaning |
 |---|---|
@@ -788,6 +930,7 @@ Config keys: `carve.check`, `carve.link` (multi-valued), `carve.judge` (`none|la
 | 3 | Check fails on HEAD or on the final tree |
 | 4 | Concurrent change (CAS failure or worktree changed) |
 | 5 | Internal error (includes a bug-report hint) |
+| 6 | `--stack --submit`: the commits and layer branches are complete, but submitting the stack failed (retrying the printed commands is safe) |
 | 129 | Command-line usage error, as with git's own commands (kept apart from 2 so a typo never reads as a refused repository state) |
 
 With `-v`, the judge's probabilities are shown next to each decision. By default no
@@ -860,6 +1003,17 @@ git-carve`, and optional prebuilt binaries.
   - The worktree-change race guard triggers correctly.
   - Refusal on each §5.1 precondition.
 - **Golden plans**: `insta` snapshots of plan buffers for the fixtures.
+- **Stacks** (`tests/stack.rs`): layers, names, refusals, exact undo, a CAS race leaving no
+  layer branch, the printed commands, and `--submit` against a stub `gh`, including exit 6
+  and `--json`.
+- **B5** (`tests/manifest.rs`): npm, Cargo and Go dependency binds.
+- **Range carves** (`tests/range.rs`, §5.6):
+  - the snapshot union and the refusals;
+  - the CLI on committed wip histories, with tsc;
+  - the safety cases (CAS race, edits mid-run, exact undo);
+  - a property test over random histories, random bases, and random partitions;
+  - an equivalence test that a range plans exactly like the eval harness's materialized
+    window. The hidden `git carve eval range-check` repeats that on real dev windows.
 - **End-to-end**: the demo repo, plus `rebase -x` with a marker-file assertion.
 - **Edge-case fixtures**: CRLF files with `core.autocrlf`, a missing final newline, an empty
   file, a binary file, an executable-bit change, a symlink, an untracked large file, a
