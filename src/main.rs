@@ -673,11 +673,17 @@ fn run_hooks(cmd: &git_carve::cli::HooksCommand) -> anyhow::Result<Exit> {
     match cmd {
         HooksCommand::Run { agent } => {
             let agent = gate::Agent::parse(agent).expect("clap checked the name");
+            // The agent runs this before every shell command, and a snippet may set
+            // `onFailure: block`, so an unread event or a crash must still answer: fail open
+            // (D50). Timeouts are the agent's to handle.
             let mut stdin = String::new();
-            std::io::stdin().read_to_string(&mut stdin)?;
-            let verdict = match gate::parse_event(agent, &stdin) {
-                Some(event) => gate::decide(&event, &Git::new(".")),
-                None => gate::Verdict::Allow,
+            let verdict = match std::io::stdin().read_to_string(&mut stdin) {
+                Err(e) => gate::Verdict::AllowUnchecked(format!("could not read the event: {e}")),
+                Ok(_) => std::panic::catch_unwind(|| match gate::parse_event(agent, &stdin) {
+                    Some(event) => gate::decide(&event, &Git::new(".")),
+                    None => gate::Verdict::Allow,
+                })
+                .unwrap_or_else(|_| gate::Verdict::AllowUnchecked("git carve crashed".into())),
             };
             let (out, err, code) = gate::respond(agent, &verdict);
             print!("{out}");
@@ -1286,10 +1292,16 @@ fn run_eval(cmd: &EvalCommand) -> anyhow::Result<Exit> {
             if let Some(m) = a.e2_merges_mean {
                 println!("E2 merges per window {m:.2}");
             }
+            if let Some(ari) = a.ari_mean {
+                println!("ARI {ari:.3} (mean over windows; not an EVAL.md metric)");
+            }
             for (name, s) in &results.per_source {
                 println!(
-                    "  {name:<22} n={:<4} BCubed F1 {:.3}  pairwise F1 {:.3}",
-                    s.windows_scored, s.e1_bcubed_f1, s.e1_pairwise.f1
+                    "  {name:<22} n={:<4} BCubed F1 {:.3}  pairwise F1 {:.3}  ARI {}",
+                    s.windows_scored,
+                    s.e1_bcubed_f1,
+                    s.e1_pairwise.f1,
+                    s.ari_mean.map_or("n/a".to_owned(), |x| format!("{x:.3}"))
                 );
             }
             if let Some(out) = out {

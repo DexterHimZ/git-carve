@@ -73,6 +73,27 @@ pub fn bcubed(items: &[(u8, usize)]) -> Option<Prf> {
     Some(Prf::from_pr(p / n, r / n))
 }
 
+/// Adjusted Rand index of the grouping against the truth (ROADMAP item 5): 1 for the same
+/// partition, about 0 for chance agreement, negative below chance. Comparable with published
+/// commit-untangling results (AtomicCommitBench reports ARI). `None` with fewer than 2 items.
+/// When both partitions are trivial (all apart or all together) the index is undefined; it
+/// is 1 if they are the same partition and 0 otherwise.
+pub fn ari(items: &[(u8, usize)]) -> Option<f64> {
+    let n = items.len();
+    if n < 2 {
+        return None;
+    }
+    let (tp, fp, fn_) = pair_counts(items);
+    let all = (n * (n - 1) / 2) as f64;
+    let (truth, plan) = ((tp + fn_) as f64, (tp + fp) as f64);
+    let expected = truth * plan / all;
+    let max = (truth + plan) / 2.0;
+    if max == expected {
+        return Some(if fp == 0 && fn_ == 0 { 1.0 } else { 0.0 });
+    }
+    Some((tp as f64 - expected) / (max - expected))
+}
+
 pub fn mean(values: &[f64]) -> f64 {
     if values.is_empty() {
         f64::NAN
@@ -102,6 +123,24 @@ pub fn bootstrap_ci(values: &[f64], seed: u64) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ari_is_one_for_the_same_partition_and_near_zero_for_chance() {
+        // Labels may differ; only the partition counts.
+        let same = [(0, 5), (0, 5), (1, 9), (1, 9), (2, 1)];
+        assert_eq!(ari(&same), Some(1.0));
+        // Truth {a,b,c}{d,e,f}; plan {a,d}{b,e}{c,f}: no pair agrees.
+        let crossed = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)];
+        assert!(ari(&crossed).unwrap() < 0.0);
+        // A worked example: truth {1,2,3}{4,5}, plan {1,2}{3,4,5}: tp 2, truth pairs 4,
+        // plan pairs 4, all 10 -> (2 - 1.6) / (4 - 1.6) = 1/6.
+        let worked = [(0, 0), (0, 0), (0, 1), (1, 1), (1, 1)];
+        assert!((ari(&worked).unwrap() - 1.0 / 6.0).abs() < 1e-12);
+        // Trivial partitions: all apart vs all apart is the same partition.
+        assert_eq!(ari(&[(0, 0), (1, 1)]), Some(1.0));
+        assert_eq!(ari(&[(0, 0), (0, 1)]), Some(0.0));
+        assert_eq!(ari(&[(0, 0)]), None);
+    }
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9

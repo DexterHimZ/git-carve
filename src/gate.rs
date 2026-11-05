@@ -478,15 +478,22 @@ fn hook_path(repo: &Repo) -> Result<PathBuf> {
 /// The snippet `hooks print` shows for each target. carve never writes these files.
 pub fn snippet(target: &str) -> Option<String> {
     let pre_tool = |agent: &str| {
+        let mut hook = serde_json::json!({
+            "type": "command",
+            "command": format!("git-carve hooks run {agent}"),
+            "timeout": 600
+        });
+        // Claude Code lets a timed-out hook through unless it says otherwise. A check that
+        // outlasts the timeout must not let a push through (`hooks run` itself fails open on
+        // its own errors, so this only bites on timeouts).
+        if agent == "claude" {
+            hook["onFailure"] = "block".into();
+        }
         serde_json::to_string_pretty(&serde_json::json!({
             "hooks": {
                 "PreToolUse": [{
                     "matcher": "Bash",
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!("git-carve hooks run {agent}"),
-                        "timeout": 600
-                    }]
+                    "hooks": [hook]
                 }]
             }
         }))
@@ -494,7 +501,7 @@ pub fn snippet(target: &str) -> Option<String> {
     };
     Some(match target {
         "claude" => format!(
-            "# Claude Code: merge into .claude/settings.json (this project) or ~/.claude/settings.json (you).\n{}\n",
+            "# Claude Code: merge into .claude/settings.json (this project) or ~/.claude/settings.json (you).\n# onFailure needs Claude Code 2.1.295 or later: a push whose check outlasts the timeout is blocked.\n{}\n",
             pre_tool("claude")
         ),
         "codex" => format!(

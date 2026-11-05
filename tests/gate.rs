@@ -205,5 +205,13 @@ fn printed_agent_snippets_are_valid_json() {
             json.contains(&format!("git-carve hooks run {agent}")),
             "{doc}"
         );
+        // Claude Code lets a timed-out hook through unless told otherwise; only its snippet
+        // has the documented field.
+        let hook = &doc["hooks"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(
+            hook.get("onFailure").and_then(|v| v.as_str()),
+            (agent == "claude").then_some("block"),
+            "{doc}"
+        );
     }
 }

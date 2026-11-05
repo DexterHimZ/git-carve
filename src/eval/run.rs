@@ -8,7 +8,7 @@ use std::time::Instant;
 use serde::Serialize;
 
 use super::corpus::{Injection, Manifest, Split, Window, apply};
-use super::metrics::{Prf, bcubed, bootstrap_ci, mean, pair_counts};
+use super::metrics::{Prf, ari, bcubed, bootstrap_ci, mean, pair_counts};
 use super::sha256::{hex, sha256};
 use crate::atom::{AtomId, AtomKind, Changes, Whole};
 use crate::error::{Error, Result, io};
@@ -43,6 +43,9 @@ pub struct WindowScore {
     pub groups: usize,
     pub true_commits: usize,
     pub bcubed: Option<Prf>,
+    /// Adjusted Rand index (ROADMAP item 5), next to BCubed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ari: Option<f64>,
     pub pairs: (usize, usize, usize),
     pub debug_left: usize,
     pub debug_left_injected: usize,
@@ -61,6 +64,9 @@ pub struct Aggregate {
     pub e1_bcubed_ci95: Option<(f64, f64)>,
     /// E1 secondary: micro pairwise.
     pub e1_pairwise: Prf,
+    /// Mean adjusted Rand index over scored windows (not part of the locked EVAL.md metrics).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ari_mean: Option<f64>,
     pub e2_merges_mean: Option<f64>,
     pub e3_group_count_error: f64,
     pub e4_debug: Prf,
@@ -347,6 +353,7 @@ fn score_window(
         .collect::<BTreeSet<_>>()
         .len();
     score.bcubed = bcubed(&items);
+    score.ari = ari(&items);
     score.pairs = pair_counts(&items);
     for id in &plan.leave {
         let debug = plan
@@ -447,12 +454,14 @@ fn aggregate(scores: &[WindowScore], seed: u64) -> Aggregate {
         .iter()
         .filter_map(|s| s.merges.map(|m| m as f64))
         .collect();
+    let aris: Vec<f64> = scored.iter().filter_map(|s| s.ari).collect();
     Aggregate {
         windows_scored: scored.len(),
         windows_skipped: skipped,
         e1_bcubed_f1: mean(&f1s),
         e1_bcubed_ci95: bootstrap_ci(&f1s, seed),
         e1_pairwise: Prf::from_counts(tp, fp, fn_),
+        ari_mean: (!aris.is_empty()).then(|| mean(&aris)),
         e2_merges_mean: (!merges.is_empty()).then(|| mean(&merges)),
         e3_group_count_error: mean(
             &scored
