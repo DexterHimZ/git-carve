@@ -815,10 +815,26 @@ human's subject.
   guard, before the main CAS, and only if it does not exist. If the main CAS fails, the
   layers are deleted again.
 
+**Re-carving a stack (D52).** Branches `<branch>-<k>` or `<branch>-<k>-*` left by an earlier
+stack are *adopted*, so their PRs survive a re-split:
+- They must form the stack: exactly one branch for each k in 1..m, each tip a commit of
+  base..HEAD strictly above the one below, and none checked out in another worktree.
+  Anything else is refused before the editor opens, naming the problem.
+- Adoption is positional. New layer k moves the adopted branch k (compare-and-swap against
+  the oid read at the start); layers above m get new names. The buffer says which commits
+  move which branches, so the order of the commit blocks decides which PR shows what.
+- Adopted layers above the new layer count are left where they were; the summary says to
+  close their PRs.
+- Before moving any adopted branch, carve writes `layers.journal` under its git path. If
+  carve dies before the main compare-and-swap, the next run moves the branches back first.
+- carve prints `git push -u <remote> --force-with-lease=<layer>:<remote oid> …` (the lease
+  pins the remote commit carve saw), `gh pr create` for the new layers, and `gh pr edit
+  <branch> --base <top layer>` when the layer count changed. `--submit` does not resubmit
+  an adopted stack yet: it exits 6 with those commands.
+
 **Refusals.**
 - Detached HEAD.
-- Branches `<branch>-<k>` or `<branch>-<k>-*` left by an earlier stack (refused before the
-  editor opens).
+- Layers from an earlier stack that cannot be adopted (above).
 - An exact name collision after editing (nothing is committed; the messages are kept).
 
 **No new check runs:** layer k's tree is prefix tree k, already checked (§8.3).
@@ -836,8 +852,8 @@ and one `gh pr create --base <below> --head <layer> --fill` per layer.
   remote is `remote.pushDefault`, else `origin`.
 - When a layer's name already exists on a remote, carve says that pushing replaces it.
 
-**Undo** deletes each layer branch that still points where carve left it, and names any
-that moved. carve never touches remotes: when layers were pushed, undo says the remote
+**Undo** deletes each new layer branch that still points where carve left it, moves each
+adopted one back to its old commit (compare-and-swap), and names any that moved since. carve never touches remotes: when layers were pushed, undo says the remote
 branches (and any pull requests) are still there.
 
 ### 10.3 Race guard
@@ -1005,7 +1021,13 @@ git-carve`, and optional prebuilt binaries.
 - **Golden plans**: `insta` snapshots of plan buffers for the fixtures.
 - **Stacks** (`tests/stack.rs`): layers, names, refusals, exact undo, a CAS race leaving no
   layer branch, the printed commands, and `--submit` against a stub `gh`, including exit 6
-  and `--json`.
+  and `--json`. Re-carves (D52): adoption and its exact undo, the refusals, a failed
+  adoption moving earlier layers back (never deleting one), and journal recovery.
+- **Push gate** (`tests/gate.rs`, D50): the installed pre-push hook, foreign hooks, the
+  agent hooks' deny and bypass rules, failing open.
+- **Parallel checks** (`tests/parallel.rs`, D51): parallel and serial verify agree, the
+  working tree is untouched, `--clean`, and a real-tsc carve plans identically at 1 and 3
+  jobs.
 - **B5** (`tests/manifest.rs`): npm, Cargo and Go dependency binds.
 - **Range carves** (`tests/range.rs`, §5.6):
   - the snapshot union and the refusals;

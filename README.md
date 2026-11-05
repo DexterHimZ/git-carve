@@ -191,6 +191,11 @@ To open the PRs without gh stack (nothing was pushed):
   --auto` instead. `git carve main --stack --submit` runs it for you: it pushes the layers and
   opens draft PRs.
 - **carve never pushes by itself.**
+- **Re-split after review without losing the PRs.** Run `git carve main --stack` again, with
+  your review fixes uncommitted. carve moves the existing layer branches instead of making
+  new ones, so each PR keeps its number and comments. It prints the
+  `git push --force-with-lease` command that updates them, and `git carve --undo` moves them
+  back.
 - **Graphite:** `gt track <layer> --parent <below>` for each layer, then
   `gt submit --stack`.
 - **Squash-merge teams are fine.** Each layer squashes on its own, with your subject as the

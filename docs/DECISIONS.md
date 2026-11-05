@@ -2036,3 +2036,60 @@ fixed, each with a regression test:
 Plus the adoption gap the review named: in a repository whose HEAD already fails the check,
 the first push after `hooks install` was blocked. `carve.noNewErrors` makes `verify`, the
 pre-push hook and the agent gate tolerate the base's errors (D43). The refusal names it.
+
+## D52. Stack iteration: a re-carve adopts the earlier stack's layers (ROADMAP item 3, built 2026-10-29)
+
+**Problem.** After review, re-splitting a stack meant deleting its layer branches, which
+closes or orphans their PRs, and retyping every message. D48's review called this the
+biggest gap: stacks are iterated, not made once.
+
+**Decision.** `git carve <base> --stack` adopts `<branch>-<k>[-*]` branches instead of
+refusing them, when they still form the branch's stack.
+- **Valid stack:** exactly one branch per k in 1..m, each tip a commit of base..HEAD strictly
+  above the one below, none checked out in another worktree. Otherwise refuse before the
+  editor, naming the problem. carve never guesses which branch a PR belongs to.
+- **Positional mapping.** New layer k moves adopted branch k. I weighed content matching
+  (patch-id, file overlap) and rejected it: gh-stack and PR order are positional, the user
+  already controls block order in the buffer, and a hidden heuristic choosing which PR gets
+  which commit breaks on the very re-splits this exists for. The buffer says which commits
+  move which branches.
+- **Never delete a layer that may carry a PR.**
+  - Extra old layers are left in place, and the summary says to close their PRs.
+  - Every rollback (a failed layer CAS, a failed main CAS, undo) moves adopted branches back
+    by compare-and-swap. Only branches carve created are deleted.
+- **Crash safety.** `layers.journal` (under carve's git path) is written before the first
+  adopted branch moves, and removed once the undo record is written. The next run moves
+  journaled branches back first. Without it, a crash in that window left a moved layer
+  outside base..HEAD, and the refusal would have steered the user to `git branch -D` a PR
+  branch. The refusal hint now says `git branch -m`.
+- **Pushing.** carve prints `git push -u <remote> --force-with-lease=<layer>:<oid> …`, with
+  the remote-tracking oid carve saw: a bare `--force-with-lease` is defeated by a
+  background fetch. It also prints `gh pr create` for new layers, and `gh pr edit <branch>
+  --base <layer>` when the layer count changed. It never pushes.
+- **`--submit`** does not resubmit an adopted stack yet, because how `gh stack init`
+  behaves on an existing stack is not verified. It exits 6 (commits complete) with the
+  commands.
+
+**The design review (2026-10-15)** made these must-changes, all adopted:
+1. Rollback must move adopted refs back, not delete them.
+2. Write a journal before the first move.
+3. Fail closed on linked worktrees.
+4. Enumerate layers unbounded: the old `existing_layers(.., n)` hid layers above the new
+   group count.
+5. Pin each push lease to an oid.
+
+**Not done.**
+- Per-layer provenance in the `# stack:` note ("mostly from old layer 2").
+- A warning when a layer's atoms mostly came from a different old layer (positional drift
+  after an insert).
+- A `gh stack sync --prune` hint for a squash-merged bottom layer.
+- Verified absorb: review fixes are grouped by the normal planner, and D47's `# from:` lines
+  show where lines came from.
+
+**Tests:** 7 in `tests/stack.rs`:
+- adoption with an exact undo;
+- the buffer note;
+- the worktree and duplicate-layer refusals;
+- a failed adoption that moves an earlier layer back;
+- journal recovery;
+- leased pushes, with `--submit` exiting 6.

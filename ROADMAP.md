@@ -32,7 +32,9 @@ demand and the October 2026 competitive map.
    - Then parallel prefix checks (`check_many`) and incremental build state in the scratch
      worktree.
    - Target: a 3–5-commit carve takes at most about 2× one check.
-3. [ ] **Stack iteration** (the D48 review's biggest gap).
+3. [x] **Stack iteration** (the D48 review's biggest gap). Built 2026-10-29 (D52): adoption,
+   CAS moves, a crash journal, leased push commands. Verified absorb and per-layer
+   provenance are still open.
    - A re-carve adopts the existing `<branch>-<k>` layers and CAS-moves them, so their PRs
      survive.
    - Their old subjects are shown for reference, as in D47.
