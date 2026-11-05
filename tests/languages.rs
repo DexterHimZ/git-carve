@@ -324,3 +324,103 @@ fn a_javascript_file_under_allow_js_is_proved_by_the_probe() {
         "{verification}"
     );
 }
+
+/// Result review of D54, finding 1: a JavaScript probe's verdict is remembered apart
+/// from a TypeScript one in the same folder, in both orders.
+#[test]
+fn javascript_and_typescript_probe_verdicts_are_remembered_apart() {
+    let repo = TestRepo::demo();
+    if !repo.link_typescript() {
+        return;
+    }
+    repo.write("src/legacy.js", "export const legacy = 1;\n");
+    repo.commit_all("everything so far");
+    let plan = |repo: &TestRepo| -> serde_json::Value {
+        let out = repo
+            .carve()
+            .args(["--plan-only", "--json"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let format = std::fs::read_to_string(repo.path().join("src/format.ts")).unwrap();
+    // JavaScript first: tsc (no allowJs) misses it. Then TypeScript in the same folder.
+    repo.write("src/legacy.js", "export const legacy = 2;\n");
+    let js = plan(&repo);
+    assert!(
+        js["verification"]["unverified"]
+            .to_string()
+            .contains("src/legacy.js"),
+        "{js}"
+    );
+    repo.run(&["checkout", "--", "src/legacy.js"]);
+    repo.write(
+        "src/format.ts",
+        format!("{format}export const unit = 'B';\n"),
+    );
+    let ts = plan(&repo);
+    assert!(
+        ts["verification"]["unverified"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the TypeScript change is proved, not refused or unverified: {ts}"
+    );
+    // TypeScript first, from a clean cache: the JavaScript file is still unverified.
+    repo.run(&["checkout", "--", "src/format.ts"]);
+    repo.carve().arg("--clean").output().unwrap();
+    repo.write(
+        "src/format.ts",
+        format!("{format}export const unit = 'B';\n"),
+    );
+    plan(&repo);
+    repo.run(&["checkout", "--", "src/format.ts"]);
+    repo.write("src/legacy.js", "export const legacy = 3;\n");
+    let js = plan(&repo);
+    assert!(
+        js["verification"]["unverified"]
+            .to_string()
+            .contains("src/legacy.js"),
+        "{js}"
+    );
+}
+
+/// Finding 2: a JavaScript file with more atoms must not take a folder's probe from the
+/// TypeScript file, or a check that reads nothing there goes undetected.
+#[test]
+fn a_javascript_file_never_takes_the_typescript_probe() {
+    let repo = TestRepo::new();
+    if !repo.link_typescript() {
+        return;
+    }
+    repo.write(".gitignore", "node_modules/\n");
+    // The check reads only other/, so it is vacuous for src/.
+    repo.write(
+        "tsconfig.json",
+        "{ \"compilerOptions\": { \"noEmit\": true }, \"include\": [\"other\"] }\n",
+    );
+    repo.write("other/x.ts", "export const x = 1;\n");
+    repo.write("src/a.ts", "export const a = 1;\n");
+    repo.write(
+        "src/legacy.js",
+        "export const p = 1;\n\n\n\nexport const q = 1;\n\n\n\nexport const r = 1;\n",
+    );
+    repo.commit_all("base");
+    repo.write("src/a.ts", "export const a = 2;\n");
+    repo.write(
+        "src/legacy.js",
+        "export const p = 2;\n\n\n\nexport const q = 2;\n\n\n\nexport const r = 2;\n",
+    );
+    let out = repo.carve().args(["--plan-only"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr(&out).contains("deliberately broken src/a.ts"),
+        "{}",
+        stderr(&out)
+    );
+}

@@ -153,6 +153,15 @@ pub fn render_range(
                         "# (merged planned commits {after} and {}: {after} alone would break the syntax of {path})",
                         after + 1
                     ),
+                    Dropped::Pulled { into, groups } => writeln!(
+                        out,
+                        "# (moved planned commit(s) {} into commit {into}: its check errors pointed at them)",
+                        groups
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
                 };
             }
             for id in &v.unleft {

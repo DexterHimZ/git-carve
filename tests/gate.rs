@@ -208,6 +208,18 @@ fn printed_agent_snippets_are_valid_json() {
         // Claude Code lets a timed-out hook through unless told otherwise; only its snippet
         // has the documented field.
         let hook = &doc["hooks"]["PreToolUse"][0]["hooks"][0];
+        if agent == "claude" {
+            // With `onFailure: block`, a machine without git-carve must not block every
+            // command: the guarded command exits 0 when the binary is missing.
+            let command = hook["command"].as_str().unwrap();
+            let out = Command::new("sh")
+                .args(["-c", command])
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(0), "{command}");
+        }
         assert_eq!(
             hook.get("onFailure").and_then(|v| v.as_str()),
             (agent == "claude").then_some("block"),

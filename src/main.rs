@@ -686,9 +686,11 @@ fn run_hooks(cmd: &git_carve::cli::HooksCommand) -> anyhow::Result<Exit> {
                 .unwrap_or_else(|_| gate::Verdict::AllowUnchecked("git carve crashed".into())),
             };
             let (out, err, code) = gate::respond(agent, &verdict);
-            print!("{out}");
-            eprint!("{err}");
-            std::io::stdout().flush()?;
+            // Never fail after the verdict (a closed pipe, say): that would be a hook failure,
+            // which `onFailure: block` turns into blocking the agent's command.
+            let _ = std::io::stdout().write_all(out.as_bytes());
+            let _ = std::io::stderr().write_all(err.as_bytes());
+            let _ = std::io::stdout().flush();
             std::process::exit(code);
         }
         HooksCommand::Print { target } => {

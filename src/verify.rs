@@ -24,6 +24,9 @@ use crate::tree::{TreeBuilder, prefix_trees};
 const MAX_PROBES: usize = 4;
 /// D40: rounds of compiler-guided leaving, and the most groups the one-at-a-time search tries.
 const RESCUE_ROUNDS: usize = 3;
+/// Error-guided repair (EG): rounds per failing boundary, and the most groups one pull moves.
+const EG_ROUNDS: usize = 3;
+const EG_MAX_PULL: usize = 4;
 const RESCUE_SEARCH_MAX: usize = 12;
 /// D40: check-output lines quoted in the buffer to say why atoms were left.
 const RESCUE_QUOTE: usize = 3;
@@ -35,6 +38,9 @@ pub enum Dropped {
     CheckFailed { after: usize, tail: String },
     /// Commit `after` would leave `path` unparseable (D14).
     Syntax { after: usize, path: String },
+    /// Error-guided repair (dev experiment, DECISIONS.md D57): planned commits `groups` (1-based)
+    /// moved into commit `into`, because its check errors pointed at them.
+    Pulled { into: usize, groups: Vec<usize> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -249,6 +255,20 @@ pub fn verify(
         }
     }
 
+    // Dev experiment (DECISIONS.md D57): repair failing boundaries from the check's own errors before
+    // merging forward. Off by default; the default plan is today's, byte for byte.
+    if keep.iter().any(|k| !k) && std::env::var_os("GIT_CARVE_DEV_ERROR_GUIDED").is_some() {
+        let (groups, style, dropped) = error_guided(repo, snap, changes, analysis, &plan, checker)?;
+        plan.groups = groups;
+        plan.style = style;
+        report.dropped = dropped;
+        report.runs = checker.runs;
+        report.cached = checker.hits;
+        report.millis = checker.millis;
+        report.wall_ms = started.elapsed().as_millis() as u64;
+        return Ok((plan, report));
+    }
+
     // Merge across dropped boundaries.
     let mut groups: Vec<Vec<AtomId>> = Vec::new();
     let mut style = None;
@@ -270,6 +290,264 @@ pub fn verify(
     report.millis = checker.millis;
     report.wall_ms = started.elapsed().as_millis() as u64;
     Ok((plan, report))
+}
+
+/// EG's result: the groups, the style group, and what moved or merged.
+type Regrouped = (Vec<Vec<AtomId>>, Option<usize>, Vec<Dropped>);
+
+/// EG: walks boundaries in order. A failing prefix pulls in the later groups its errors point
+/// at (`eg_candidates`), up to `EG_ROUNDS` times; if that does not make it pass, the boundary
+/// is merged forward as in D2. Every check request, cached or not, spends the budget, so a
+/// warm cache cannot change the plan. Returns the groups, the style group and what moved.
+fn error_guided(
+    repo: &Repo,
+    snap: &Snapshot,
+    changes: &Changes,
+    analysis: &Analysis,
+    plan: &Plan,
+    checker: &mut Checker,
+) -> Result<Regrouped> {
+    let mut groups = plan.groups.clone();
+    let mut style = plan.style;
+    // 1-based planned numbers of each current group, for the report.
+    let mut origin: Vec<Vec<usize>> = (1..=groups.len()).map(|g| vec![g]).collect();
+    let mut dropped = Vec::new();
+    let mut budget = 2 * groups.len() + 4;
+    let check_prefix = |groups: &[Vec<AtomId>],
+                        k: usize,
+                        budget: &mut usize,
+                        checker: &mut Checker|
+     -> Result<std::result::Result<crate::check::Outcome, String>> {
+        *budget = budget.saturating_sub(1);
+        if let Some(path) = syntax_break(changes, analysis, &groups[..=k]) {
+            return Ok(Err(path));
+        }
+        let trees = prefix_trees(repo, &snap.base.tree, changes, &groups[..=k])?;
+        Ok(Ok(checker.check(trees.last().expect("non-empty prefix"))?))
+    };
+    let merge_forward = |groups: &mut Vec<Vec<AtomId>>,
+                         origin: &mut Vec<Vec<usize>>,
+                         style: &mut Option<usize>,
+                         k: usize| {
+        let next = groups.remove(k + 1);
+        groups[k].extend(next);
+        groups[k].sort_unstable();
+        let o = origin.remove(k + 1);
+        origin[k].extend(o);
+        *style = match *style {
+            Some(s) if s == k + 1 => None,
+            Some(s) if s > k + 1 => Some(s - 1),
+            s => s,
+        };
+    };
+    let mut k = 0;
+    while k + 1 < groups.len() {
+        if budget == 0 {
+            // Out of budget: the rest becomes one commit, whose prefix is the passing final tree.
+            while k + 1 < groups.len() {
+                let after = origin[k + 1][0] - 1;
+                dropped.push(Dropped::CheckFailed {
+                    after,
+                    tail: "(error-guided repair: out of budget)".into(),
+                });
+                merge_forward(&mut groups, &mut origin, &mut style, k);
+            }
+            break;
+        }
+        let outcome = match check_prefix(&groups, k, &mut budget, checker)? {
+            Err(path) => {
+                dropped.push(Dropped::Syntax {
+                    after: origin[k + 1][0] - 1,
+                    path,
+                });
+                merge_forward(&mut groups, &mut origin, &mut style, k);
+                continue;
+            }
+            Ok(o) if o.passed => {
+                k += 1;
+                continue;
+            }
+            Ok(o) => o,
+        };
+        let mut trial = (groups.clone(), origin.clone(), style);
+        let mut tail = outcome.tail.clone();
+        let mut moved: Vec<usize> = Vec::new();
+        let mut fixed = false;
+        let rounds = std::env::var("GIT_CARVE_DEV_EG_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(EG_ROUNDS);
+        for _ in 0..rounds {
+            if budget == 0 {
+                break;
+            }
+            let cands = eg_candidates(changes, analysis, &trial.0, k, &tail, trial.2);
+            if std::env::var_os("GIT_CARVE_DEV_EG_TRACE").is_some() {
+                eprintln!(
+                    "eg: boundary {k} of {}: candidates {cands:?}; errors at {:?}",
+                    trial.0.len(),
+                    error_locations(&tail)
+                );
+            }
+            let after: usize = trial.0[k + 1..].iter().map(Vec::len).sum();
+            let pulled: usize = cands.iter().map(|&j| trial.0[j].len()).sum();
+            // Never pull everything that is left: then there is no split to repair.
+            if cands.is_empty() || cands.len() > EG_MAX_PULL || pulled >= after {
+                break;
+            }
+            for &j in cands.iter().rev() {
+                let atoms = trial.0.remove(j);
+                trial.0[k].extend(atoms);
+                let o = trial.1.remove(j);
+                moved.extend(&o);
+                trial.1[k].extend(o);
+                trial.2 = trial.2.map(|s| if s > j { s - 1 } else { s });
+            }
+            trial.0[k].sort_unstable();
+            let checked = check_prefix(&trial.0, k, &mut budget, checker)?;
+            if std::env::var_os("GIT_CARVE_DEV_EG_TRACE").is_some() {
+                eprintln!(
+                    "eg:   trial: {}",
+                    match &checked {
+                        Err(path) => format!("syntax break in {path}"),
+                        Ok(o) if o.passed => "passes".to_owned(),
+                        Ok(_) => "fails".to_owned(),
+                    }
+                );
+            }
+            match checked {
+                Err(_) => break,
+                Ok(o) if o.passed => {
+                    fixed = true;
+                    break;
+                }
+                Ok(o) => tail = o.tail,
+            }
+        }
+        if fixed {
+            moved.sort_unstable();
+            dropped.push(Dropped::Pulled {
+                into: k + 1,
+                groups: moved,
+            });
+            (groups, origin, style) = trial;
+            k += 1;
+        } else {
+            dropped.push(Dropped::CheckFailed {
+                after: origin[k + 1][0] - 1,
+                tail: outcome.tail,
+            });
+            merge_forward(&mut groups, &mut origin, &mut style, k);
+        }
+    }
+    Ok((groups, style, dropped))
+}
+
+/// EG candidates: later groups (index > `k`, never `style`) the errors in the tree of
+/// `groups[..=k]` point at. First tier that finds any: (a1) an error line inside an atom that
+/// is not applied yet; (a2) an error line, outside every atom, that references a same-file
+/// definition an unapplied atom changes (tsc reports at the use site, not the declaration).
+fn eg_candidates(
+    changes: &Changes,
+    analysis: &Analysis,
+    groups: &[Vec<AtomId>],
+    k: usize,
+    tail: &str,
+    style: Option<usize>,
+) -> BTreeSet<usize> {
+    let group_of: BTreeMap<AtomId, usize> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(g, atoms)| atoms.iter().map(move |&id| (id, g)))
+        .collect();
+    let later = |id: AtomId| {
+        group_of
+            .get(&id)
+            .copied()
+            .filter(|&g| g > k && Some(g) != style)
+    };
+    let (mut exact, mut by_ref) = (BTreeSet::new(), BTreeSet::new());
+    for (path, line) in error_locations(tail) {
+        let at = line.saturating_sub(1);
+        let Some(f) = changes.files.iter().position(|file| {
+            let p = show(&file.path);
+            p == path || p.ends_with(&format!("/{path}")) || path.ends_with(&format!("/{p}"))
+        }) else {
+            continue;
+        };
+        let mut atoms: Vec<AtomId> = changes.file_atoms[f]
+            .iter()
+            .map(|&i| changes.atoms[i].id)
+            .collect();
+        atoms.sort_by_key(|&id| match &changes.atom(id).kind {
+            AtomKind::Region(r) => r.base.start,
+            _ => 0,
+        });
+        // Walk the file as it is in the prefix tree: applied atoms at their new length,
+        // the others (later groups, leave) at their base length.
+        let mut offset: i64 = 0;
+        let mut inside = false;
+        for &id in &atoms {
+            let applied = group_of.get(&id).is_some_and(|&g| g <= k);
+            match &changes.atom(id).kind {
+                AtomKind::Region(r) => {
+                    let start = (i64::from(r.base.start) + offset).max(0) as u32;
+                    if at < start {
+                        break;
+                    }
+                    let (new_len, base_len) = (r.new.end - r.new.start, r.base.end - r.base.start);
+                    let len = if applied { new_len } else { base_len };
+                    if at < start + len.max(1) {
+                        inside = true;
+                        if !applied {
+                            exact.extend(later(id));
+                        }
+                        break;
+                    }
+                    if applied {
+                        offset += i64::from(new_len) - i64::from(base_len);
+                    }
+                }
+                _ => {
+                    inside = true;
+                    if !applied {
+                        exact.extend(later(id));
+                    }
+                    break;
+                }
+            }
+        }
+        if inside {
+            continue;
+        }
+        // A context line: in base coordinates, it references definitions of this file.
+        let b = (i64::from(at) - offset).max(0) as u32;
+        let Some(facts) = analysis.base.get(f).and_then(Option::as_ref) else {
+            continue;
+        };
+        for name in facts.refs.iter().filter(|r| r.line == b).map(|r| &r.name) {
+            let def = facts
+                .defs
+                .iter()
+                .filter(|d| &d.name == name && d.name_line <= b)
+                .max_by_key(|d| d.name_line)
+                .or_else(|| facts.defs.iter().find(|d| &d.name == name));
+            let Some(def) = def else { continue };
+            for &id in &atoms {
+                if let AtomKind::Region(r) = &changes.atom(id).kind {
+                    let touches = if r.base.start == r.base.end {
+                        def.lines.start <= r.base.start && r.base.start < def.lines.end
+                    } else {
+                        r.base.start < def.lines.end && def.lines.start < r.base.end
+                    };
+                    if touches {
+                        by_ref.extend(later(id));
+                    }
+                }
+            }
+        }
+    }
+    if exact.is_empty() { by_ref } else { exact }
 }
 
 /// The base (HEAD, or the base of a re-carved range) fails the check. When its errors are
@@ -590,7 +868,14 @@ fn probe(
             .filter(|_| below.contains(&b'/'))
             .unwrap_or(b"")
             .to_vec();
-        let dir = [dir, b"\0".to_vec(), folder].concat();
+        // D54: a file the check only may read (JavaScript under tsc) gets its own slot and its
+        // own remembered verdict, so its miss is never replayed for, or taken from, a hard file.
+        let soft = checker
+            .spec
+            .soft_reads
+            .contains(&crate::lang::extension(&file.path));
+        let class: &[u8] = if soft { b"\0soft" } else { b"" };
+        let dir = [dir, b"\0".to_vec(), folder, class.to_vec()].concat();
         let entry = per_dir.entry(dir).or_insert((f, atoms));
         if atoms > entry.1 {
             *entry = (f, atoms);
@@ -598,7 +883,11 @@ fn probe(
     }
     // (path, key, remembered verdict, or the broken tree to check)
     let mut found: Vec<(String, String, Option<bool>, Option<String>)> = Vec::new();
-    for (dir, (f, _)) in per_dir.into_iter().take(MAX_PROBES) {
+    // Hard slots first, so soft ones never crowd them out of the probe limit.
+    let (hard, soft): (Vec<_>, Vec<_>) = per_dir
+        .into_iter()
+        .partition(|(dir, _)| !dir.ends_with(b"\0soft"));
+    for (dir, (f, _)) in hard.into_iter().chain(soft).take(MAX_PROBES) {
         let file = &changes.files[f];
         let path = show(&file.path);
         let key = format!("{configs}|{}", show(&dir).replace('\0', "|"));

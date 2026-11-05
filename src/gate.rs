@@ -484,9 +484,14 @@ pub fn snippet(target: &str) -> Option<String> {
             "timeout": 600
         });
         // Claude Code lets a timed-out hook through unless it says otherwise. A check that
-        // outlasts the timeout must not let a push through (`hooks run` itself fails open on
-        // its own errors, so this only bites on timeouts).
+        // outlasts the timeout must not let a push through. With `onFailure: block`, a missing
+        // binary would block every shell command too, so the command checks for it first, as
+        // the pre-push hook does; `hooks run` itself fails open on its own errors (D55).
         if agent == "claude" {
+            hook["command"] = format!(
+                "command -v git-carve >/dev/null 2>&1 || exit 0; exec git-carve hooks run {agent}"
+            )
+            .into();
             hook["onFailure"] = "block".into();
         }
         serde_json::to_string_pretty(&serde_json::json!({
