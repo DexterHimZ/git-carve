@@ -1,8 +1,8 @@
 {
   "name": "git-carve",
   "version": "0.0.0",
-  "description": "Splits a dirty working tree into commits that each pass your check. Never writes your commit messages.",
-  "license": "UNLICENSED",
+  "description": "Turns a branch, yours or your agent's, into commits or a stack of PRs that each pass your check before you push.",
+  "license": "MIT OR Apache-2.0",
   "bin": {
     "git-carve": "bin/git-carve.js"
   },

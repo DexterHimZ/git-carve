@@ -465,7 +465,6 @@ fn a_rescued_carve_commits_only_passing_work_and_undoes_exactly() {
         .collect();
     let file = repo.path().join("../rescued-plan.txt");
     fs::write(&file, filled).unwrap();
-    repo.run(&["config", "carve.agentMessages", "true"]); // D49: a scripted plan file
     let out = repo
         .carve()
         .args(["--check", BROKEN_CHECK, "--plan-file"])
@@ -540,7 +539,7 @@ fn a_head_that_fails_is_refused_with_a_hint() {
     let repo = head_with_an_old_error();
     let out = repo
         .carve()
-        .args(["--plan-only", "--check", TSC_LIKE])
+        .args(["--plan-only", "--strict", "--check", TSC_LIKE])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
@@ -549,7 +548,19 @@ fn a_head_that_fails_is_refused_with_a_hint() {
         err.contains("fails on HEAD") && err.contains("HEAD already has 1 error"),
         "{err}"
     );
-    assert!(err.contains("git carve --no-new-errors"), "{err}");
+    assert!(err.contains("Without --strict"), "{err}");
+    // D53: without --strict, the same tree carves, tolerating HEAD's error.
+    let out = repo
+        .carve()
+        .args(["--plan-only", "--check", TSC_LIKE])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("HEAD already fails the check with 1 error"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 #[test]
@@ -602,10 +613,14 @@ fn no_new_errors_with_real_tsc_tolerates_errors_already_at_head() {
         "src/a.ts",
         "export function a(): number {\n  return 2;\n}\n",
     );
-    let refused = repo.carve().args(["--plan-only"]).output().unwrap();
+    let refused = repo
+        .carve()
+        .args(["--plan-only", "--strict"])
+        .output()
+        .unwrap();
     assert_eq!(refused.status.code(), Some(3), "{}", stderr(&refused));
     assert!(
-        stderr(&refused).contains("--no-new-errors"),
+        stderr(&refused).contains("Without --strict"),
         "{}",
         stderr(&refused)
     );

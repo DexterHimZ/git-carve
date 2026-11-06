@@ -41,6 +41,8 @@ pub enum Dropped {
     /// Error-guided repair (dev experiment, DECISIONS.md D57): planned commits `groups` (1-based)
     /// moved into commit `into`, because its check errors pointed at them.
     Pulled { into: usize, groups: Vec<usize> },
+    /// `--layers` (D59): the smallest neighbors merged, `from` commits into `to`.
+    Layers { from: usize, to: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -573,10 +575,14 @@ fn head_fails(
     };
     let hint = match &base.errors {
         Some(errors) if !checker.no_new_errors => format!(
-            "hint: {what} already has {} error{}. To carve anyway, so that no commit adds a new \
-             one: git carve --no-new-errors",
+            "hint: {what} already has {} error{}. Without --strict (or carve.noNewErrors false), \
+             carve commits only what adds no new one",
             errors.len(),
             if errors.len() == 1 { "" } else { "s" }
+        ),
+        None if checker.no_new_errors => format!(
+            "hint: {what} already fails, and the check prints no `path(line,col): error` lines \
+             carve can compare, so it cannot tell new errors from old ones; fix {what} first"
         ),
         _ => "hint: if the check needs untracked files (such as .env), list them in carve.link"
             .to_owned(),

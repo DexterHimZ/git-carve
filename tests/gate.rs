@@ -138,7 +138,8 @@ fn agent_hook_denies_a_push_whose_commit_fails_and_says_how_to_fix_it() {
     let reason = stderr(&out);
     assert!(reason.contains("wip"), "{reason}");
     assert!(reason.contains("git carve @{u}"), "{reason}");
-    assert!(reason.contains("--plan-file <file> --edit"), "{reason}");
+    assert!(reason.contains("--plan-file <file>`"), "{reason}");
+    assert!(reason.contains("carve.requireHumanMessages"), "{reason}");
 
     // Codex has the same contract; Cursor reads JSON.
     let out = hook_run("codex", &bash_event(&repo, "git push origin main"));

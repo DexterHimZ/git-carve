@@ -348,7 +348,6 @@ fn a_regroup_that_fails_the_check_reopens_then_succeeds() {
 fn plan_file_runs_without_an_editor() {
     let repo = TestRepo::demo();
     // D49: messages in a plan file need the repository's opt-in.
-    repo.run(&["config", "carve.agentMessages", "true"]);
     let plan_out = repo
         .carve()
         .args(["--plan-only", "--no-check"])
@@ -387,11 +386,12 @@ fn plan_file_runs_without_an_editor() {
     assert!(stderr(&out).contains("unknown atom a999"));
 }
 
-/// D49: without the opt-in, a plan file's messages are refused (nothing is committed), and
-/// `--edit` opens the editor on the plan so the human writes them.
+/// D58 (D49's opt-in): under `carve.requireHumanMessages`, a plan file's messages are refused
+/// (nothing is committed), and `--edit` opens the editor on the plan so the human writes them.
 #[test]
-fn plan_file_messages_need_the_editor_or_the_opt_in() {
+fn require_human_messages_refuses_filled_plan_files_without_the_editor() {
     let repo = TestRepo::demo();
+    repo.run(&["config", "carve.requireHumanMessages", "true"]);
     let head = repo.run(&["rev-parse", "HEAD"]);
     let plan_out = repo
         .carve()
@@ -411,6 +411,35 @@ fn plan_file_messages_need_the_editor_or_the_opt_in() {
     assert_eq!(repo.run(&["rev-parse", "HEAD"]), head, "nothing committed");
 
     // Filled messages seed the editor only as proposals: saving untouched aborts.
+    let out = repo
+        .carve()
+        .env("GIT_EDITOR", "true")
+        .args(["--no-check", "--edit", "--plan-file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(repo.run(&["rev-parse", "HEAD"]), head, "nothing committed");
+
+    // Messages below the atom lines, with CRLF endings, are proposals too (review of
+    // D58): saving untouched still aborts.
+    // Every commit block gets its message after its atoms; `leave` gets none.
+    let mut below = String::new();
+    let mut in_commit = false;
+    for line in stdout(&plan_out).lines() {
+        if (line == "commit" || line == "leave") && in_commit {
+            below.push_str("Agent wrote this\r\n");
+        }
+        if line == "commit" || line == "leave" {
+            in_commit = line == "commit";
+        }
+        below.push_str(line);
+        below.push_str("\r\n");
+    }
+    if in_commit {
+        below.push_str("Agent wrote this\r\n");
+    }
+    fs::write(&file, &below).unwrap();
     let out = repo
         .carve()
         .env("GIT_EDITOR", "true")

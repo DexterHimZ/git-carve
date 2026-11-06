@@ -24,14 +24,6 @@ say "git carve --plan-only   (the buffer your editor gets; every commit already 
 git carve --plan-only 2>/dev/null
 N=$(git carve --plan-only 2>/dev/null | grep -c '^commit$')
 
-say "Optional: git carve --judge   (built-in learned judge; EVAL verdict: optional flag, provisional)"
-J=$(git carve --plan-only --judge 2>/dev/null | grep -c '^commit$')
-echo "code-only: $N commits; --judge: $J commits. Why the judge merged what it merged:"
-git carve --plan-only --judge --json 2>/dev/null \
-  | sed -n '/"judge_merges"/,/\]/p' | grep '^ *"a' | sed -e 's/^ *"/  /' -e 's/",\{0,1\}$//'
-echo "In its buffer, carve flags the merges it is least sure of (D30):"
-git carve --plan-only --judge 2>/dev/null | grep '^# unsure' | sed 's/^/  /'
-echo "(Known, DECISIONS.md D37/D38: the judge helps on small trees, not measurably on large ones; code-only is the default.)"
 
 BEFORE_STATUS=$(git status --porcelain=v2; git diff)
 BEFORE_FILES=$(fingerprint)
@@ -149,10 +141,10 @@ LEGACY=$(mktemp -d /tmp/carve-try-legacy.XXXXXX)
   printf 'export const legacy: number = "not a number";\n' > src/legacy.ts
   git add src/legacy.ts && git -c user.name=demo -c user.email=demo@example.com commit -qm "legacy type error"
   git stash pop -q
-  echo "  2. HEAD already has a type error: carve refuses and says why (D43)..."
-  git carve --plan-only 2>&1 >/dev/null | grep -E 'fails on HEAD|hint' | sed 's/^/     /' || true
-  echo "     ...and with --no-new-errors, no commit may add a new one:"
-  git carve --plan-only --no-new-errors 2>/dev/null | sed -n '1p' | sed 's/^/     /'
+  echo "  2. HEAD already has a type error: carve still carves, and no commit may add a new one (D53):"
+  git carve --plan-only 2>/dev/null | sed -n '1p' | sed 's/^/     /'
+  echo "     ...and with --strict, it refuses and says why:"
+  git carve --plan-only --strict 2>&1 >/dev/null | grep -E 'fails on HEAD|hint' | sed 's/^/     /' || true
 )
 rm -rf "$BROKEN" "$LEGACY"
 

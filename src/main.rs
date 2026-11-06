@@ -1,7 +1,9 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use git_carve::cli::{Arm, Cli, Command, EvalCommand, Split};
+#[cfg(feature = "eval")]
+use git_carve::cli::{Arm, EvalCommand, Split};
+use git_carve::cli::{Cli, Command};
 use git_carve::exit::Exit;
 use git_carve::git::Git;
 use git_carve::plan::{self, RenderOptions};
@@ -36,6 +38,7 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli) -> anyhow::Result<Exit> {
+    #[cfg(feature = "eval")]
     if let Some(Command::Eval(cmd)) = &cli.command {
         return run_eval(cmd);
     }
@@ -109,19 +112,26 @@ fn run(cli: &Cli) -> anyhow::Result<Exit> {
     let opts = Options {
         base,
         stack: cli.run.stack,
+        layers: cli
+            .run
+            .layers
+            .or(cli.run.stack.then_some(5))
+            .filter(|&n| n > 0),
+        layers_default: cli.run.layers.is_none(),
         check: cli.run.check.clone(),
         no_check: cli.run.no_check,
         plan_file: cli.run.plan_file.clone(),
         edit: cli.run.edit,
-        judge: cli.run.judge.then(git_carve::judge::LearnedJudge::builtin),
-        no_new_errors: cli.run.no_new_errors,
+        judge: judge_option(cli),
+        no_new_errors: git_carve::branch::tolerance(&repo, cli.run.strict, cli.run.no_new_errors)?
+            .0,
         jobs: None,
     };
     if let Some(judge) = opts.judge.as_ref().filter(|_| cli.run.verbose) {
         eprintln!("judge: {} (built in; {})", judge.name, judge.config());
     }
     if cli.run.plan_only {
-        let prepared = session::prepare(&repo, &opts)?;
+        let prepared = session::prepare(&repo, &session::plan_only_options(&repo, &opts)?)?;
         if let Some(checker) = &prepared.checker {
             if cli.run.verbose {
                 eprintln!("check: {}", checker.spec.command);
@@ -438,6 +448,8 @@ fn run_report(
         "commits": commits,
         "left": s.record.left,
         "verified": s.verification.as_ref().map(|v| v.check.clone()),
+        // D58: where the messages came from (`editor`, `plan-file+edit`, `plan-file`).
+        "plan_source": s.record.plan_source,
         "range": s.range.as_ref().map(|r| json!({"base": r.oid, "commits": r.commits.len()})),
         "stack": stack,
         "undo": "git carve --undo",
@@ -461,8 +473,15 @@ fn print_stack(
     let remote = stack::remote_name(repo)?;
     let mut branches: Vec<String> = stack.layers.iter().map(|(b, _, _)| b.clone()).collect();
     branches.push(stack.branch.clone());
+    // Non-negotiable 3: under tolerance, say "no new error", never "passed" (D53).
     let checked = match &s.verification {
-        Some(v) => format!("each passed `{}`", v.check),
+        Some(v) => match v.baseline_errors {
+            Some(e) => format!(
+                "each adds no error beyond the base's {e} under `{}`",
+                v.check
+            ),
+            None => format!("each passed `{}`", v.check),
+        },
         None => "NOT verified (--no-check)".to_owned(),
     };
     println!(
@@ -637,7 +656,7 @@ fn print_summary(s: &Summary) {
         println!("  {} {subject}", &oid[..7]);
     }
     if s.record.plan_source.as_deref() == Some("plan-file") {
-        println!("Their messages came from the plan file, not the editor (carve.agentMessages).");
+        println!("Their messages came from the plan file, not the editor.");
     }
     if !s.record.left.is_empty() {
         let hunks = s.record.left.len();
@@ -741,12 +760,14 @@ fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<
     } else {
         vec![args.range.clone()]
     };
+    let tolerance = branch::tolerance(repo, args.strict, args.no_new_errors)?;
     let report = branch::verify_branch(
         repo,
         &VerifyOptions {
             ranges,
             check: args.check.clone(),
-            no_new_errors: args.no_new_errors || git_carve::branch::no_new_errors_config(repo)?,
+            no_new_errors: tolerance.0,
+            by_default: tolerance.1,
             fail_fast: args.fail_fast || args.pre_push,
         },
     )?;
@@ -818,7 +839,7 @@ fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<
                 );
                 if let Some(e) = report.base_fails {
                     println!(
-                        "hint: the range's base already fails with {e} error{}; to check only for new ones: git carve verify --no-new-errors",
+                        "hint: the range's base already fails with {e} error{}; without --strict (or carve.noNewErrors false), only new ones count",
                         if e == 1 { "" } else { "s" }
                     );
                 }
@@ -832,6 +853,18 @@ fn run_verify(repo: &Repo, args: &git_carve::cli::VerifyArgs) -> anyhow::Result<
     })
 }
 
+/// `--judge` (D60: only in builds with the `eval` feature).
+#[cfg(feature = "eval")]
+fn judge_option(cli: &Cli) -> Option<git_carve::judge::LearnedJudge> {
+    cli.run.judge.then(git_carve::judge::LearnedJudge::builtin)
+}
+
+#[cfg(not(feature = "eval"))]
+fn judge_option(_: &Cli) -> Option<git_carve::judge::LearnedJudge> {
+    None
+}
+
+#[cfg(feature = "eval")]
 fn run_eval(cmd: &EvalCommand) -> anyhow::Result<Exit> {
     use git_carve::eval::{corpus, run};
     let env = Git::new(std::env::current_dir()?);

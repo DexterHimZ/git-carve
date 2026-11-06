@@ -26,4 +26,8 @@ jobs:
       - run: npm install -g typescript@5   # real-tsc tests (verify.rs) skip without it
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # The evaluation harness and the judge flag build only with the `eval` feature (D60).
+      - run: cargo clippy --all-targets --features eval -- -D warnings
+      - run: cargo test --features eval
+      # The shipped feature set, tested too.
       - run: cargo test

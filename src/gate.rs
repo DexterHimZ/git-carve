@@ -333,7 +333,8 @@ fn check_push(dir: &Path, revs: Vec<String>, env: &Git) -> Result<Option<String>
         &VerifyOptions {
             ranges,
             check: None,
-            no_new_errors: branch::no_new_errors_config(&repo)?,
+            no_new_errors: branch::tolerance(&repo, false, false)?.0,
+            by_default: branch::tolerance(&repo, false, false)?.1,
             fail_fast: true,
         },
     )?;
@@ -356,16 +357,18 @@ fn check_push(dir: &Path, revs: Vec<String>, env: &Git) -> Result<Option<String>
     }
     if let Some(e) = report.base_fails {
         reason.push_str(&format!(
-            "The base already fails with {e} error(s). To check only for new ones in this repository: git config carve.noNewErrors true\n"
+            "The base already fails with {e} error(s), and carve.noNewErrors is false here. To check only for new ones: git config --unset carve.noNewErrors\n"
         ));
     }
     reason.push_str(&format!(
         "Every pushed commit must pass. Do not bypass this with --no-verify. Either:\n\
-         - fix the code (amend the failing commit, or fix it in a new commit and have the user re-split), or\n\
-         - have the user re-split the unpushed commits so each one passes: `git carve {base}`.\n\
-         \x20 To help, run `git carve {base} --plan-only --json`, save its `buffer` to a file, put a suggested\n\
-         \x20 message under each `commit` line as `# proposed: …` comments, and ask the user to run\n\
-         \x20 `git carve {base} --plan-file <file> --edit`. The user writes the messages.\n"
+         - fix the code (amend the failing commit, or fix it in a new commit), or\n\
+         - re-split the unpushed commits so each one passes: run `git carve {base} --plan-only --json`,\n\
+         \x20 save its `buffer` to a file under `$(git rev-parse --git-path carve)`, write a message under\n\
+         \x20 each `commit` line, and run `git carve {base} --plan-file <file>`. Every commit is checked\n\
+         \x20 before anything moves, and `git carve --undo` restores the previous state.\n\
+         \x20 If the repository sets carve.requireHumanMessages, write them as `# proposed: …` comments\n\
+         \x20 instead and ask the user to run it with --edit.\n"
     ));
     Ok(Some(reason))
 }

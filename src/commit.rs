@@ -64,7 +64,7 @@ pub struct UndoRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<StackRef>,
     /// Where the plan and its messages came from (D49): `editor`, `plan-file+edit` (a human
-    /// reviewed a plan file in the editor) or `plan-file` (no editor; `carve.agentMessages`).
+    /// reviewed a plan file in the editor) or `plan-file` (no editor: whoever filled the file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_source: Option<String>,
 }

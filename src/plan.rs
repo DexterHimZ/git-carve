@@ -153,6 +153,10 @@ pub fn render_range(
                         "# (merged planned commits {after} and {}: {after} alone would break the syntax of {path})",
                         after + 1
                     ),
+                    Dropped::Layers { from, to } => writeln!(
+                        out,
+                        "# (--layers: merged the smallest neighboring commits, {from} into {to}; each still passes)"
+                    ),
                     Dropped::Pulled { into, groups } => writeln!(
                         out,
                         "# (moved planned commit(s) {} into commit {into}: its check errors pointed at them)",
@@ -689,15 +693,23 @@ impl Fnv {
 /// D49: every message line of a plan buffer becomes a `# proposed:` comment, so only the
 /// human's own typing can fill a message. Comments, atom lines, and blank lines stay.
 pub fn messages_as_proposals(text: &str) -> String {
-    let mut in_message = false;
+    // The same lexing as `blocks()`: CRLF, a trimmed `commit`/`leave`, `#` comments, atom
+    // lines, and message lines anywhere in a commit block, before or after its atoms (the
+    // review of D58: a message below the `@` lines had slipped through).
+    let mut in_commit = false;
+    let mut cut = false;
     let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if line == "commit" {
-            in_message = true;
-        } else if line == "leave" || trimmed.starts_with('@') {
-            in_message = false;
-        } else if in_message && !trimmed.is_empty() && !trimmed.starts_with('#') {
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        cut |= line == SCISSORS;
+        let trimmed = line.trim();
+        if cut || line.starts_with('#') || atom_id(line).is_some() {
+            // Kept as is.
+        } else if trimmed == "commit" {
+            in_commit = true;
+        } else if trimmed == "leave" {
+            in_commit = false;
+        } else if in_commit && !trimmed.is_empty() {
             out.push_str("# proposed: ");
         }
         out.push_str(line);
@@ -709,6 +721,23 @@ pub fn messages_as_proposals(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of D58: no message line survives as a message, wherever it sits.
+    #[test]
+    fn proposals_cover_messages_after_atoms_and_crlf() {
+        let text = "commit\r\n  @ a1   x.ts:1\r\nAgent wrote this\r\n  commit  \nfirst\n  @ a2   y.ts:2\nleave\n  @ a3   z.ts:3\n";
+        let out = messages_as_proposals(text);
+        assert!(out.contains("# proposed: Agent wrote this"), "{out}");
+        assert!(out.contains("# proposed: first"), "{out}");
+        assert!(!out.contains('\r'), "{out}");
+        let (blocks, errors) = blocks(&out);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            blocks
+                .iter()
+                .all(|b| b.message.iter().all(|l| l.trim().is_empty()))
+        );
+    }
 
     #[test]
     fn atom_lines_read_only_the_id() {

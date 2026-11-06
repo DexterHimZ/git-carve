@@ -27,6 +27,10 @@ pub struct VerifyOptions {
     pub ranges: Vec<Vec<String>>,
     pub check: Option<String>,
     pub no_new_errors: bool,
+    /// The tolerance came from the default (D53), not from a flag or `carve.noNewErrors`:
+    /// when the base fails without errors carve can tell apart, stay strict instead of
+    /// refusing.
+    pub by_default: bool,
     /// Stop at the first failing commit, for a gate that needs a verdict, not a report
     /// (`--fail-fast`, implied by `--pre-push`). The D1 probe then runs only when every commit
     /// passed: it guards against a false pass, and a failure needs no such proof.
@@ -76,13 +80,24 @@ impl BranchReport {
     }
 }
 
-/// `carve.noNewErrors` (D50): verify, the pre-push hook and the agent gate tolerate errors the
-/// range's base already has, as `--no-new-errors` does, in a repository whose HEAD fails.
-pub fn no_new_errors_config(repo: &Repo) -> Result<bool> {
+/// `carve.noNewErrors` (D50), or `None` when unset.
+pub fn no_new_errors_config(repo: &Repo) -> Result<Option<bool>> {
     Ok(repo
         .git
         .try_run_str(["config", "--type=bool", "carve.noNewErrors"])?
-        .is_some_and(|v| v.trim() == "true"))
+        .map(|v| v.trim() == "true"))
+}
+
+/// D53: whether errors the base already has are tolerated, and whether that is only the
+/// default. `--strict` or `carve.noNewErrors false` turn it off; `--no-new-errors` or
+/// `carve.noNewErrors true` ask for it explicitly; otherwise it is on by default.
+pub fn tolerance(repo: &Repo, strict: bool, explicit: bool) -> Result<(bool, bool)> {
+    let config = no_new_errors_config(repo)?;
+    if strict || (config == Some(false) && !explicit) {
+        return Ok((false, false));
+    }
+    let asked = explicit || config == Some(true);
+    Ok((true, !asked))
 }
 
 /// The range a plain `git carve verify` checks: commits not on the upstream, or, without one,
@@ -233,13 +248,19 @@ pub fn verify_branch(repo: &Repo, opts: &VerifyOptions) -> Result<BranchReport> 
         if let Some(base) = &base_tree {
             let outcome = checker.check(base)?;
             if !outcome.passed {
-                report.baseline_errors = Some(checker.set_baseline(&outcome).ok_or_else(|| {
-                    Error::CheckFailed(format!(
-                        "the range's base fails the check without errors carve recognizes, so \
-                         there is no baseline to compare with\ncheck: {}\n{}",
-                        checker.spec.display, outcome.tail
-                    ))
-                })?);
+                match checker.set_baseline(&outcome) {
+                    Some(n) => report.baseline_errors = Some(n),
+                    // D53: the default tolerates only errors carve can tell apart; with a
+                    // check that prints none (cargo, go, `make test`), verify stays strict.
+                    None if opts.by_default => checker.no_new_errors = false,
+                    None => {
+                        return Err(Error::CheckFailed(format!(
+                            "the range's base fails the check without errors carve recognizes, \
+                             so there is no baseline to compare with\ncheck: {}\n{}",
+                            checker.spec.display, outcome.tail
+                        )));
+                    }
+                }
             }
         }
     }
@@ -306,7 +327,7 @@ pub fn verify_branch(repo: &Repo, opts: &VerifyOptions) -> Result<BranchReport> 
     }
 
     // A failure that the base shares is worth a hint (D43).
-    if report.failed() > 0 && !opts.no_new_errors {
+    if report.failed() > 0 && !checker.no_new_errors {
         if let Some(base) = &base_tree {
             let outcome = checker.check(base)?;
             if !outcome.passed {

@@ -3,13 +3,27 @@ name = "git-carve"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Splits your mess into commits that each pass your check. Refuses to write your commit messages."
-# Flip at M7, once the license and README are decided.
+description = "Turns a branch, yours or your agent's, into commits or a stack of PRs that each pass your check before you push."
+license = "MIT OR Apache-2.0"
+# Flipped at publication (D39): the license and README are decided (D60).
 publish = false
 
 [[bin]]
 name = "git-carve"
 path = "src/main.rs"
+
+[features]
+# The evaluation harness and the learned judge's flag (D60): `cargo build --features eval`.
+# Release builds leave them out of the user's binary.
+eval = []
+
+[[test]]
+name = "eval"
+required-features = ["eval"]
+
+[[test]]
+name = "judge"
+required-features = ["eval"]
 
 [dependencies]
 anyhow = "1"                                     # errors at the CLI edge (project convention)

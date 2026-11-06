@@ -790,3 +790,193 @@ fn stack_recarve_of_pushed_layers_prints_leased_pushes_and_never_submits() {
         Some(repo.run(&["rev-parse", "feat~2"]).as_str())
     );
 }
+
+/// D58: the unattended agent flow. An agent takes the plan buffer from `--plan-only --json`,
+/// fills the messages, and hands it back with `--plan-file`: no editor, verified layers, and
+/// the run says where the messages came from.
+#[test]
+fn an_agent_fills_the_plan_and_carve_builds_the_stack_without_an_editor() {
+    let (repo, _) = feature_branch();
+    let out = repo
+        .carve()
+        .args(["main", "--stack", "--plan-only", "--json", "--no-check"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut n = 0;
+    let filled: Vec<String> = doc["buffer"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .map(|l| {
+            if l == "commit" {
+                n += 1;
+                format!("commit\nAgent layer {n}")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("plan.txt");
+    fs::write(&file, filled.join("\n") + "\n").unwrap();
+    let out = repo
+        .carve()
+        .env("GIT_EDITOR", "false")
+        .args(["main", "--stack", "--no-check", "--json", "--plan-file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["plan_source"], "plan-file", "{report}");
+    assert!(branch_tip(&repo, "feat-1-agent-layer-1").is_some());
+    assert!(branch_tip(&repo, "feat-2-agent-layer-2").is_some());
+    assert_eq!(repo.run(&["log", "--format=%s", "-1"]), "Agent layer 3");
+}
+
+/// D59: `--layers` caps the stack by merging the smallest neighbors; the default (5) leaves a
+/// small stack alone, and the buffer says what merged.
+#[test]
+fn layers_caps_the_stack_by_merging_the_smallest_neighbors() {
+    let (repo, _) = feature_branch();
+    let layers = |extra: &[&str]| -> (usize, String) {
+        let out = repo
+            .carve()
+            .args([
+                "main",
+                "--stack",
+                "--plan-only",
+                "--json",
+                "--check",
+                "true",
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        (
+            doc["groups"].as_array().unwrap().len(),
+            doc["buffer"].as_str().unwrap().to_owned(),
+        )
+    };
+    let (default, buffer) = layers(&[]);
+    assert_eq!(default, 3, "three layers fit under the default of 5");
+    assert!(!buffer.contains("--layers"), "{buffer}");
+    let (two, buffer) = layers(&["--layers", "2"]);
+    assert_eq!(two, 2);
+    assert!(
+        buffer.contains("# (--layers: merged the smallest neighboring commits, 3 into 2"),
+        "{buffer}"
+    );
+    assert_eq!(layers(&["--layers", "0"]).0, 3, "0 means no limit");
+    let out = repo.carve().args(["--layers", "2"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(129),
+        "--layers needs --stack (a usage error)"
+    );
+}
+
+/// Seven independent changes, one commit each, on `feat` over `main`.
+fn seven_file_branch() -> TestRepo {
+    let repo = TestRepo::new();
+    for k in 1..=7 {
+        repo.write(&format!("f{k}.txt"), "base\n");
+    }
+    repo.commit_all("base");
+    repo.run(&["branch", "-m", "feat"]);
+    repo.run(&["branch", "main"]);
+    for k in 1..=7 {
+        repo.write(&format!("f{k}.txt"), format!("change {k}\n"));
+        repo.commit_all(&format!("change {k}"));
+    }
+    repo
+}
+
+/// D59 review: an existing stack's shape wins over the default `--layers` cap (a
+/// 7-layer stack is not squeezed to 5, so no PR is silently orphaned); an explicit cap is
+/// honored, and the buffer names the layers that stay behind.
+#[test]
+fn recarving_a_bigger_stack_keeps_its_layers_under_the_default_cap() {
+    let repo = seven_file_branch();
+    let out = carve_stack(
+        &repo,
+        &["main", "--stack", "--layers", "0", "--check", "true"],
+        None,
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(branch_tip(&repo, "feat-6-commit-6-subject").is_some());
+    let buffer = |extra: &[&str]| -> String {
+        let out = repo
+            .carve()
+            .env("GIT_EDITOR", "cat")
+            .args(["main", "--stack", "--check", "true"])
+            .args(extra)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let default = buffer(&[]);
+    assert!(
+        default.contains("# stack: commits 1-6 move feat-1-commit-1-subject"),
+        "{default}"
+    );
+    assert!(!default.contains("stay where they are"), "{default}");
+    let plan = repo
+        .carve()
+        .args([
+            "main",
+            "--stack",
+            "--plan-only",
+            "--json",
+            "--check",
+            "true",
+        ])
+        .output()
+        .unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(
+        doc["groups"].as_array().unwrap().len(),
+        7,
+        "plan-only agrees"
+    );
+    let capped = buffer(&["--layers", "3"]);
+    assert!(
+        capped.contains("commits 1-2 move feat-1-commit-1-subject, feat-2-commit-2-subject"),
+        "{capped}"
+    );
+    assert!(
+        capped.contains("stay where they are (close their PRs)"),
+        "{capped}"
+    );
+}
+
+/// D53 review: under default tolerance the stack summary says "no new error", never
+/// "passed" (non-negotiable 3: the summary says which).
+#[test]
+fn a_stack_over_a_failing_base_says_no_new_error_not_passed() {
+    let repo = TestRepo::new();
+    for f in ["a.txt", "b.txt"] {
+        repo.write(f, "base\n");
+    }
+    repo.write("c.txt", "OLDBAD\n");
+    repo.commit_all("base with an old error");
+    repo.run(&["branch", "-m", "feat"]);
+    repo.run(&["branch", "main"]);
+    repo.write("a.txt", "alpha\n");
+    repo.commit_all("a");
+    repo.write("b.txt", "beta\n");
+    repo.commit_all("b");
+    let check = "out=$(grep -n OLDBAD a.txt b.txt c.txt 2>/dev/null); test -z \"$out\" || { echo \"$out\" | sed 's/^\\([^:]*\\):\\([0-9]*\\):\\(.*\\)/\\1(\\2,1): error TS9999: \\3/'; exit 1; }";
+    let out = carve_stack(&repo, &["main", "--stack", "--check", check], None);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = out_str(&out);
+    assert!(
+        text.contains("each adds no error beyond the base's 1"),
+        "{text}"
+    );
+    assert!(!text.contains("each passed"), "{text}");
+}

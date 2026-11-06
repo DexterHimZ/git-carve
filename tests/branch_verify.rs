@@ -285,7 +285,7 @@ fn no_new_errors_measures_each_commit_against_the_base() {
 
     let plain = repo
         .carve()
-        .args(["verify", "HEAD~2..HEAD", "--check", TSC_LIKE])
+        .args(["verify", "HEAD~2..HEAD", "--strict", "--check", TSC_LIKE])
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&plain.stdout);
@@ -496,4 +496,64 @@ fn no_new_errors_keeps_cached_failures_of_checks_without_parsed_errors() {
         "failures without parsed errors stay cached: {second}"
     );
     assert_eq!(passed(&second), passed(&first));
+}
+
+/// D53: tolerance is the default; `carve.noNewErrors false` (or `--strict`) turns it off.
+#[test]
+fn verify_tolerates_the_bases_errors_by_default_and_config_makes_it_strict() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.write("b.txt", "base\n");
+    repo.write("c.txt", "OLDBAD\n");
+    repo.commit_all("base with an old error");
+    repo.write("a.txt", "alpha\n");
+    repo.commit_all("adds no new error");
+    let run = |repo: &TestRepo| {
+        json(
+            &repo
+                .carve()
+                .args(["verify", "HEAD~1..HEAD", "--json", "--check", TSC_LIKE])
+                .output()
+                .unwrap(),
+        )
+    };
+    let doc = run(&repo);
+    assert_eq!(passed(&doc), vec![true], "{doc}");
+    assert_eq!(doc["baseline_errors"], 1, "{doc}");
+    repo.run(&["config", "carve.noNewErrors", "false"]);
+    assert_eq!(passed(&run(&repo)), vec![false]);
+}
+
+/// D53 must-change: when tolerance is only the default and the base fails without
+/// errors carve can compare (a plain check), verify stays strict instead of erroring; asking
+/// for tolerance explicitly still says there is no baseline.
+#[test]
+fn an_unparsable_failing_base_keeps_the_default_strict() {
+    let (repo, _) = three_commits();
+    let plain = "! grep -q BROKEN a.txt b.txt c.txt";
+    // HEAD~1 adds BROKEN, so the range base fails, printing nothing carve can compare.
+    let out = repo
+        .carve()
+        .args(["verify", "HEAD~1..HEAD", "--json", "--check", plain])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let doc = json(&out);
+    assert_eq!(passed(&doc), vec![false], "{doc}");
+    let out = repo
+        .carve()
+        .args([
+            "verify",
+            "HEAD~1..HEAD",
+            "--no-new-errors",
+            "--check",
+            plain,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        stderr(&out).contains("no baseline to compare with"),
+        "{}",
+        stderr(&out)
+    );
 }

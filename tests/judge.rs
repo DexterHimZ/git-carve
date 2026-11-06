@@ -153,7 +153,6 @@ fn the_judge_flag_carves_end_to_end_and_undoes() {
         with_messages(&String::from_utf8_lossy(&buffer.stdout)),
     )
     .unwrap();
-    repo.run(&["config", "carve.agentMessages", "true"]); // D49: a scripted plan file
     let out = repo
         .carve()
         .args(["--no-check", "--judge", "--plan-file"])

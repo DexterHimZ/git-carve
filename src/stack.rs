@@ -10,7 +10,8 @@ use crate::repo::Repo;
 const SLUG_MAX: usize = 32;
 
 /// `Add retry with backoff!` → `add-retry-with-backoff`: lowercase ASCII letters and digits,
-/// everything else collapsed to one `-`, trimmed, at most [`SLUG_MAX`] characters.
+/// everything else collapsed to one `-`, trimmed, at most [`SLUG_MAX`] characters, cut at a
+/// word boundary when one exists (an agent found mid-word names confusing).
 pub fn slug(subject: &str) -> String {
     let mut out = String::new();
     for c in subject.chars() {
@@ -20,7 +21,14 @@ pub fn slug(subject: &str) -> String {
             out.push('-');
         }
     }
-    let mut out: String = out.trim_matches('-').chars().take(SLUG_MAX).collect();
+    let full = out.trim_matches('-');
+    let mut out: String = full.chars().take(SLUG_MAX).collect();
+    let cut_mid_word = full.len() > out.len() && full.as_bytes()[out.len()] != b'-';
+    if cut_mid_word {
+        if let Some(at) = out.rfind('-') {
+            out.truncate(at);
+        }
+    }
     while out.ends_with('-') {
         out.pop();
     }
@@ -342,7 +350,7 @@ mod tests {
             names,
             [
                 "feat-1-rename-fmtbytes-to-formatbytes",
-                "feat-2-retry-failed-fetches-with-backof"
+                "feat-2-retry-failed-fetches-with"
             ]
         );
         assert_eq!(layer_names("feat", &subjects), names);

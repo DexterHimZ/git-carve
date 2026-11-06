@@ -35,6 +35,10 @@ pub struct Options {
     pub base: Option<crate::precondition::ResolvedBase>,
     /// `--stack` (D48): one branch per commit but the last, on top of the range's base.
     pub stack: bool,
+    /// `--layers` (D59): with `--stack`, at most this many commits; `None` for no limit.
+    pub layers: Option<usize>,
+    /// `layers` is the default, not the user's: an adopted stack's shape wins over it.
+    pub layers_default: bool,
     /// Parallel check workers, overriding `carve.checkJobs` (D51; the speed benchmark).
     pub jobs: Option<usize>,
 }
@@ -79,11 +83,14 @@ pub struct Prepared<'r> {
     pub sources: crate::attribution::Sources,
 }
 
-/// `carve.agentMessages` (D49): an agent may write the message lines of a plan file.
-fn agent_messages(repo: &Repo) -> Result<bool> {
+/// `carve.requireHumanMessages` (D58, reversing D49's default): message lines come only from
+/// the editor. A plan file with filled messages is refused without `--edit`, and with
+/// `--edit` its messages open as `# proposed:` comments. Off by default: whoever fills a
+/// plan file (a human or an agent) supplies its messages, and `plan_source` records which.
+fn require_human_messages(repo: &Repo) -> Result<bool> {
     Ok(repo
         .git
-        .try_run_str(["config", "--type=bool", "carve.agentMessages"])?
+        .try_run_str(["config", "--type=bool", "carve.requireHumanMessages"])?
         .is_some_and(|v| v.trim() == "true"))
 }
 
@@ -99,8 +106,11 @@ pub fn prepare<'r>(repo: &'r Repo, opts: &Options) -> Result<Prepared<'r>> {
     precondition::check_size(repo, &changes)?;
     let sources = crate::attribution::attribute(repo, &snap, &changes)?;
     let analysis = facts::analyze(repo, &changes)?;
-    let plan = graph::plan_with(&changes, &analysis, opts.judge.as_ref());
+    let mut plan = graph::plan_with(&changes, &analysis, opts.judge.as_ref());
     if opts.no_check {
+        if let Some(max) = opts.layers {
+            cap_layers(&changes, &mut plan, max);
+        }
         return Ok(Prepared {
             snap,
             changes,
@@ -118,8 +128,17 @@ pub fn prepare<'r>(repo: &'r Repo, opts: &Options) -> Result<Prepared<'r>> {
     if let Some(jobs) = opts.jobs {
         checker.jobs = jobs.max(1);
     }
-    let (plan, verification) =
+    let (mut plan, mut verification) =
         verify::verify(repo, &snap, &changes, &analysis, &plan, &mut checker)?;
+    if let Some(max) = opts.layers {
+        let from = plan.groups.len();
+        if cap_layers(&changes, &mut plan, max) {
+            verification.dropped.push(verify::Dropped::Layers {
+                from,
+                to: plan.groups.len(),
+            });
+        }
+    }
     Ok(Prepared {
         snap,
         changes,
@@ -129,6 +148,76 @@ pub fn prepare<'r>(repo: &'r Repo, opts: &Options) -> Result<Prepared<'r>> {
         checker: Some(checker),
         sources,
     })
+}
+
+/// D59: merges the adjacent pair of groups with the fewest changed lines (the earlier pair on a
+/// tie) until at most `max` remain. Each merge only removes a boundary, so every remaining
+/// prefix is the same tree as before: a verified plan stays verified without a check run.
+/// Returns whether anything merged.
+fn cap_layers(changes: &Changes, plan: &mut Plan, max: usize) -> bool {
+    let size = |id: &AtomId| -> usize {
+        match &changes.atom(*id).kind {
+            crate::atom::AtomKind::Region(r) => {
+                (r.new.end - r.new.start + r.base.end - r.base.start) as usize
+            }
+            _ => 1,
+        }
+    };
+    let mut sizes: Vec<usize> = plan
+        .groups
+        .iter()
+        .map(|g| g.iter().map(size).sum())
+        .collect();
+    let mut merged = false;
+    while max > 0 && plan.groups.len() > max {
+        let i = (0..plan.groups.len() - 1)
+            .min_by_key(|&i| (sizes[i] + sizes[i + 1], i))
+            .expect("at least two groups");
+        let next = plan.groups.remove(i + 1);
+        plan.groups[i].extend(next);
+        plan.groups[i].sort_unstable();
+        sizes[i] += sizes.remove(i + 1);
+        plan.style = match plan.style {
+            Some(s) if s == i || s == i + 1 => None,
+            Some(s) if s > i + 1 => Some(s - 1),
+            s => s,
+        };
+        merged = true;
+    }
+    merged
+}
+
+/// `opts` with the default `--layers` cap raised to keep an adopted stack's `layers` branches
+/// plus its top (D59 review: the existing shape wins over the default, never over an
+/// explicit `--layers`).
+fn with_room_for(opts: &Options, layers: usize) -> Options {
+    let mut out = opts.clone();
+    if out.layers_default {
+        out.layers = out.layers.map(|cap| cap.max(layers + 1));
+    }
+    out
+}
+
+/// The options `--plan-only` plans with: as a run would, with room for the layers an earlier
+/// `--stack` left that a re-carve would adopt. Adoption problems are left to the run to report.
+pub fn plan_only_options(repo: &Repo, opts: &Options) -> Result<Options> {
+    if !opts.stack || !opts.layers_default {
+        return Ok(opts.clone());
+    }
+    let Some(branch) = repo
+        .git
+        .try_run_str(["symbolic-ref", "-q", "--short", "HEAD"])?
+    else {
+        return Ok(opts.clone());
+    };
+    let head = repo.git.run_str(["rev-parse", "HEAD"])?;
+    let base = opts
+        .base
+        .as_ref()
+        .filter(|b| !b.commits.is_empty())
+        .map_or(head.clone(), |b| b.oid.clone());
+    let adopted = crate::stack::adopt(repo, &branch, &base, &head)?.unwrap_or_default();
+    Ok(with_room_for(opts, adopted.len()))
 }
 
 /// A full run: the plan buffer, then commits.
@@ -146,15 +235,9 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
     } else {
         None
     };
-    let mut prepared = prepare(repo, opts)?;
-    if prepared.plan.groups.is_empty() {
-        return Err(Error::Aborted(
-            "every change is left out (large or binary new files, debug lines); nothing to commit"
-                .into(),
-        ));
-    }
     // D52: an earlier stack's layers are adopted (moved, so their PRs survive) when they
-    // still form this branch's stack, and refused before the editor otherwise.
+    // still form this branch's stack, and refused before the editor otherwise. Known before
+    // planning, so the default `--layers` cap can make room for them (D59 review).
     let recovered = commit::recover_layers(repo)?;
     if !recovered.is_empty() {
         return Err(Error::Concurrent(format!(
@@ -162,13 +245,14 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             recovered.join(", ")
         )));
     }
+    let head = repo.git.run_str(["rev-parse", "HEAD"])?;
+    let base = opts
+        .base
+        .as_ref()
+        .filter(|b| !b.commits.is_empty())
+        .map_or(head.clone(), |b| b.oid.clone());
     let adopted = match &stack_branch {
-        Some(branch) => match crate::stack::adopt(
-            repo,
-            branch,
-            &prepared.snap.base.commit,
-            &prepared.snap.head.commit,
-        )? {
+        Some(branch) => match crate::stack::adopt(repo, branch, &base, &head)? {
             Ok(adopted) => adopted,
             Err(why) => {
                 return Err(crate::error::precondition(
@@ -181,6 +265,15 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
         },
         None => Vec::new(),
     };
+    let owned = with_room_for(opts, adopted.len());
+    let opts = &owned;
+    let mut prepared = prepare(repo, opts)?;
+    if prepared.plan.groups.is_empty() {
+        return Err(Error::Aborted(
+            "every change is left out (large or binary new files, debug lines); nothing to commit"
+                .into(),
+        ));
+    }
     let saved_path = repo.carve_dir.join("PLAN.saved");
     let saved: Saved = fs::read(&saved_path)
         .ok()
@@ -189,12 +282,33 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
     let (messages, mut notes) = plan::restore(&saved, &prepared.changes, &prepared.plan.groups);
     if !adopted.is_empty() {
         // D52: positional, so the order of the commit blocks below decides which PR shows what.
-        let names: Vec<&str> = adopted.iter().map(|a| a.name.as_str()).collect();
-        notes.push(format!(
-            "# stack: commits 1-{} move {} (adopted: their PRs stay); the last commit is the branch itself",
-            names.len(),
-            names.join(", ")
-        ));
+        // Only as many layers move as the plan has commits below the top (D59 review).
+        let moving = adopted
+            .len()
+            .min(prepared.plan.groups.len().saturating_sub(1));
+        let names = |range: &[crate::stack::Adopted]| -> String {
+            range
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut note = if moving > 0 {
+            format!(
+                "# stack: commits 1-{moving} move {} (adopted: their PRs stay)",
+                names(&adopted[..moving])
+            )
+        } else {
+            "# stack: no adopted layer moves".to_owned()
+        };
+        if moving < adopted.len() {
+            note.push_str(&format!(
+                "; {} stay where they are (close their PRs)",
+                names(&adopted[moving..])
+            ));
+        }
+        note.push_str("; the last commit is the branch itself");
+        notes.push(note);
     }
     let diff_lines = repo.config_u64("carve.planDiff", plan::DIFF_TOTAL_DEFAULT as u64)? as usize;
     let mut text = plan::render_range(
@@ -224,9 +338,10 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
     let from_file = opts.plan_file.as_ref().filter(|_| !opts.edit);
     if let (Some(path), true) = (&opts.plan_file, opts.edit) {
         text = fs::read_to_string(path).map_err(io(format!("read {}", path.display())))?;
-        // Messages already in the file are shown as proposals, so saving untouched (or an
-        // editor like `true`) cannot turn them into commits (D49 review).
-        if !agent_messages(repo)? {
+        // Under carve.requireHumanMessages, messages already in the file are shown as
+        // proposals, so saving untouched (or an editor like `true`) cannot turn them into
+        // commits (D49 review).
+        if require_human_messages(repo)? {
             text = plan::messages_as_proposals(&text);
         }
     }
@@ -263,15 +378,12 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
             Parsed::Plan(edited) => {
                 if from_file.is_some()
                     && edited.groups.iter().any(|g| !g.message.trim().is_empty())
-                    && !agent_messages(repo)?
+                    && require_human_messages(repo)?
                 {
                     return Err(crate::error::precondition(
-                        "the plan file has commit messages in it, and carve takes messages only from \
-                         its editor (DECISIONS.md D49)",
-                        Some(
-                            "review it and write them yourself: add --edit. To let agents write \
-                             messages in this repository: git config carve.agentMessages true",
-                        ),
+                        "the plan file has commit messages in it, and this repository takes \
+                         messages only from carve's editor (carve.requireHumanMessages)",
+                        Some("review it and write them yourself: add --edit"),
                     ));
                 }
                 let (groups, _) = edited.structure();
@@ -420,7 +532,13 @@ pub fn run(repo: &Repo, opts: &Options) -> Result<Summary> {
         merges: prepared
             .verification
             .as_ref()
-            .map_or(0, |v| v.dropped.len()),
+            // Boundaries the check took away; `--layers` merges are a choice, not a failure.
+            .map_or(0, |v| {
+                v.dropped
+                    .iter()
+                    .filter(|d| !matches!(d, verify::Dropped::Layers { .. }))
+                    .count()
+            }),
         verification: prepared.verification,
         missing: edited
             .missing

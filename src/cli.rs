@@ -37,6 +37,11 @@ pub struct RunArgs {
     #[arg(long, requires = "base")]
     pub stack: bool,
 
+    /// With --stack: at most this many layers; the smallest neighbors merge until the stack
+    /// fits (each merge keeps every layer passing). 0 for no limit [default: 5]
+    #[arg(long, value_name = "N", requires = "stack")]
+    pub layers: Option<usize>,
+
     /// After committing, submit the stack with `gh stack` (pushes the layers, opens draft PRs)
     #[arg(long, requires = "stack", conflicts_with_all = ["no_check", "plan_only"])]
     pub submit: bool,
@@ -49,15 +54,22 @@ pub struct RunArgs {
     #[arg(long, conflicts_with = "check")]
     pub no_check: bool,
 
-    /// When HEAD already fails the check, commit only what adds no new error to HEAD's
+    /// Refuse when HEAD already fails the check. By default carve tolerates HEAD's errors and
+    /// commits only what adds no new one (D53)
     #[arg(long, conflicts_with = "no_check")]
+    pub strict: bool,
+
+    /// The default since D53; still accepted so older scripts and hooks keep working
+    #[arg(long, hide = true, conflicts_with_all = ["no_check", "strict"])]
     pub no_new_errors: bool,
 
     /// Code-only grouping (the default)
+    #[cfg(feature = "eval")]
     #[arg(long)]
     pub no_judge: bool,
 
     /// Let the built-in learned judge decide merges code cannot settle (local, deterministic)
+    #[cfg(feature = "eval")]
     #[arg(long, conflicts_with = "no_judge")]
     pub judge: bool,
 
@@ -65,9 +77,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub plan_only: bool,
 
-    /// Read a filled plan buffer from this file instead of opening the editor. Its message
-    /// lines must be empty unless `carve.agentMessages` is true; with --edit, the editor
-    /// opens on it and you write them (DECISIONS.md D49)
+    /// Read a filled plan buffer from this file instead of opening the editor; its message
+    /// lines become the commit messages, and the run records that they came from a file. With
+    /// --edit, the editor opens on it first. `carve.requireHumanMessages` refuses filled
+    /// messages without --edit (DECISIONS.md D58)
     #[arg(long, value_name = "PATH", conflicts_with = "plan_only")]
     pub plan_file: Option<PathBuf>,
 
@@ -100,6 +113,7 @@ pub enum Command {
     #[command(subcommand)]
     Hooks(HooksCommand),
     /// The evaluation harness (docs/EVAL.md): build the corpus, run an arm
+    #[cfg(feature = "eval")]
     #[command(hide = true, subcommand)]
     Eval(EvalCommand),
 }
@@ -135,8 +149,13 @@ pub struct VerifyArgs {
     #[arg(long, value_name = "CMD")]
     pub check: Option<String>,
 
-    /// Tolerate errors the range's base already has: a commit fails only for new ones
+    /// Also fail commits for errors the range's base already has. By default a commit fails
+    /// only for new ones (D53)
     #[arg(long)]
+    pub strict: bool,
+
+    /// The default since D53; still accepted so older scripts and hooks keep working
+    #[arg(long, hide = true, conflicts_with = "strict")]
     pub no_new_errors: bool,
 
     /// Read the refs being pushed from a pre-push hook's standard input (implies --fail-fast)
