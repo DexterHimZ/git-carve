@@ -405,9 +405,26 @@ pub fn plan_soft(changes: &Changes, analysis: &Analysis, soft_mode: Soft) -> Pla
                         .bridging_import_atoms
                         .extend(atoms.iter().map(|&i| changes.atoms[i].id));
                 }
+                // D61: a re-export or side-effect import of a module this change adds goes with
+                // that module (a barrel line has no names for `users` to follow).
+                let module = atoms
+                    .iter()
+                    .flat_map(|&i| facts[i].adds_module.iter().copied())
+                    .find_map(|f| {
+                        (0..groups.len())
+                            .find(|&g| groups[g].iter().any(|&j| changes.atoms[j].file == f))
+                    })
+                    // Dev-only ablation, as for the soft edges: `GIT_CARVE_DEV_DISABLE_EDGES=F8`.
+                    .filter(|_| {
+                        !std::env::var("GIT_CARVE_DEV_DISABLE_EDGES")
+                            .unwrap_or_default()
+                            .split(',')
+                            .any(|k| k.trim() == "F8")
+                    });
                 let target = adders
                     .first()
                     .copied()
+                    .or(module)
                     .or_else(|| users(&removed, false).last().copied())
                     .or_else(|| nearest_in_file(&groups, atoms[0]));
                 match target {
@@ -708,6 +725,10 @@ pub fn edges(changes: &Changes, analysis: &Analysis) -> Edges {
                 .is_some()
             {
                 add(a, b, "F0");
+            }
+            // F8 (D61): a new re-export or side-effect import and the new module it names.
+            if facts[a].adds_module.contains(&changes.atoms[b].file) {
+                add(a, b, "F8");
             }
             // F3: a modified definition and references to it added or removed elsewhere.
             if facts[a]

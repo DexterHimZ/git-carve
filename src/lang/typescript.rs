@@ -344,8 +344,13 @@ impl Walker<'_> {
                 }
             }
             "export_statement" => {
-                if node.child_by_field_name("source").is_some() {
+                if let Some(source) = node.child_by_field_name("source") {
                     self.facts.import_lines.push(lines(node));
+                    let source = self
+                        .text(source)
+                        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                        .to_owned();
+                    self.facts.module_refs.push((source, lines(node)));
                 }
                 if self.is_default_export(node) {
                     let named = node
@@ -465,6 +470,12 @@ impl Walker<'_> {
             .named_children(&mut cursor)
             .filter(|c| c.kind() == "import_clause")
             .collect();
+        if clauses.is_empty() {
+            // `import './polyfill'`: no name to resolve, only the module (D61).
+            self.facts
+                .module_refs
+                .push((source.clone(), statement.clone()));
+        }
         for clause in clauses {
             let mut cursor = clause.walk();
             let parts: Vec<Node> = clause.named_children(&mut cursor).collect();

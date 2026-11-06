@@ -45,6 +45,9 @@ pub enum Class {
 
 #[derive(Clone, Debug, Default)]
 pub struct AtomFacts {
+    /// D61: files the change set adds that this atom's new re-export or side-effect import
+    /// names (`export * from './timing'`): the line cannot come before the module.
+    pub adds_module: BTreeSet<usize>,
     pub adds_def: BTreeSet<Key>,
     pub removes_def: BTreeSet<Key>,
     pub modifies_def: BTreeSet<Key>,
@@ -146,6 +149,8 @@ struct Context<'a> {
     fin: &'a [Option<FileFacts>],
     /// Import resolution per (file, version, import index): the changed file it names.
     imports: HashMap<(usize, bool, usize), Option<usize>>,
+    /// D61: per (file, module_refs index) of the final version, the changed file it names.
+    module_refs: HashMap<(usize, usize), usize>,
     /// Top-level definition names per changed file, either version.
     top_names: Vec<BTreeSet<String>>,
     stoplist: BTreeSet<&'static str>,
@@ -168,6 +173,7 @@ impl<'a> Context<'a> {
             .collect();
         let mut resolver = Resolver::new(&repo.toplevel);
         let mut imports = HashMap::new();
+        let mut module_refs = HashMap::new();
         for (i, f) in changes.files.iter().enumerate() {
             for (is_final, facts) in [(false, &base[i]), (true, &fin[i])] {
                 let Some(facts) = facts else { continue };
@@ -188,6 +194,15 @@ impl<'a> Context<'a> {
                         Target::Unresolved => None,
                     };
                     imports.insert((i, is_final, k), target);
+                }
+                if is_final {
+                    for (k, (source, _)) in facts.module_refs.iter().enumerate() {
+                        if let Target::Path(p) = resolver.resolve(&f.path, source, &exists) {
+                            if let Some(&j) = by_path.get(p.as_slice()) {
+                                module_refs.insert((i, k), j);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -213,6 +228,7 @@ impl<'a> Context<'a> {
             base,
             fin,
             imports,
+            module_refs,
             top_names,
             stoplist,
             any_stoplist: crate::lang::stoplist(),
@@ -366,6 +382,14 @@ impl<'a> Context<'a> {
         new: &Range<u32>,
     ) -> AtomFacts {
         let mut facts = AtomFacts::default();
+        for (k, (_, lines)) in fin.module_refs.iter().enumerate() {
+            let added_here = lines.start < new.end && new.start < lines.end;
+            if let Some(&j) = self.module_refs.get(&(file, k)).filter(|_| added_here) {
+                if j != file && self.changes.files[j].base.is_none() {
+                    facts.adds_module.insert(j);
+                }
+            }
+        }
         let keys = |f: &FileFacts| -> BTreeSet<Key> {
             (0..f.defs.len())
                 .map(|d| self.def_key(file, f, d))

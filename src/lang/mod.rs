@@ -22,6 +22,10 @@ pub struct FileFacts {
     pub import_lines: Vec<Range<u32>>,
     /// Names exported through `export default <name>` or `export default function <name>`.
     pub default_export: Option<String>,
+    /// Module specifiers of statements that bind no local name: re-exports
+    /// (`export * from 'x'`, `export { a } from 'x'`) and side-effect imports (`import 'x'`),
+    /// with their lines (D61: such a line belongs with the new module it names).
+    pub module_refs: Vec<(String, Range<u32>)>,
     pub has_error: bool,
 }
 

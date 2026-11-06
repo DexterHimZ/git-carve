@@ -424,3 +424,49 @@ fn a_javascript_file_never_takes_the_typescript_probe() {
         stderr(&out)
     );
 }
+
+/// D61 (F8): a barrel line (`export * from './b'`) names no symbol, so it used to become a
+/// commit of its own; it now goes with the new module it re-exports. `import './polyfill'`
+/// likewise. An unrelated change stays apart.
+#[test]
+fn a_barrel_line_goes_with_the_new_module_it_reexports() {
+    let repo = TestRepo::new();
+    repo.write("src/index.ts", "export * from './a';\n");
+    repo.write("src/main.ts", "export const main = 1;\n");
+    repo.write("src/a.ts", "export const a = 1;\n");
+    repo.commit_all("base");
+    repo.write(
+        "src/index.ts",
+        "export * from './a';\nexport * from './b';\n",
+    );
+    repo.write("src/b.ts", "export const b = 2;\n");
+    repo.write(
+        "src/main.ts",
+        "import './polyfill';\nexport const main = 1;\n",
+    );
+    repo.write("src/polyfill.ts", "export {};\n");
+    repo.write("src/a.ts", "export const a = 3;\n");
+    let doc = plan_json(&repo, &["--check", "true"]);
+    let group_of = |path: &str| -> usize {
+        let ids: Vec<&serde_json::Value> = doc["atoms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["path"] == path)
+            .map(|a| &a["id"])
+            .collect();
+        doc["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|g| g.as_array().unwrap().iter().any(|id| ids.contains(&id)))
+            .unwrap_or_else(|| panic!("{path} in no group: {doc}"))
+    };
+    assert_eq!(group_of("src/index.ts"), group_of("src/b.ts"), "{doc}");
+    assert_eq!(
+        group_of("src/main.ts"),
+        group_of("src/polyfill.ts"),
+        "{doc}"
+    );
+    assert_ne!(group_of("src/a.ts"), group_of("src/b.ts"), "{doc}");
+}
