@@ -45,10 +45,12 @@ demand and the October 2026 competitive map.
    - name-flow edges;
    - co-change coupling;
    - F7 as weaker evidence.
-5. [ ] **ARI and Hungarian-matched accuracy in the eval**, next to BCubed.
+5. [~] **ARI and Hungarian-matched accuracy in the eval**, next to BCubed. ARI is built
+   (2026-10-29, D56). Hungarian-matched accuracy is still open.
 6. [ ] **Deeper non-TypeScript support:**
    - Python and Go grammars;
-   - JavaScript through the TypeScript parser;
+   - [x] JavaScript through the TypeScript parser (2026-10-29, D54: ES modules; CommonJS
+     waits for corpus evidence);
    - retraining the judge with generic facts.
 7. [ ] **Commit hooks:** validate messages with `commit-msg` (commitlint).
 8. [ ] **Rung 1.5 judge** (D35, D37, D38), under a new pre-registration with the D34 holdout.

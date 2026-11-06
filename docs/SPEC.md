@@ -100,8 +100,10 @@ Names: publish as the crate/package `git-carve` with the binary `git-carve`, so 
 ### 4.1 In v1
 
 - One target language for symbol extraction: **TypeScript** (`.ts`, `.tsx`, `.mts`, `.cts`),
-  decided 2026-09-23 (§15). Files in other languages, including `.js`, still become atoms;
-  they just get no symbol edges.
+  decided 2026-09-23 (§15). Since 2026-10-29 (D54), **JavaScript** (`.js`, `.jsx`, `.mjs`,
+  `.cjs`) goes through the same adapter with the TSX grammar: ES module imports and exports.
+  CommonJS is not covered yet. Files in other languages still become atoms, with the generic
+  adapter's facts (D45) or none.
 - Tracked modifications, deletions, additions of untracked non-ignored files, mode changes,
   binary files (whole-file only), and symlinks (whole-entry only).
 - Code-only grouping (§6), check verification with merge-forward (§8), one plan buffer (§9),
@@ -271,6 +273,15 @@ unicode), random edit scripts, and random subsets and partitions.
 ## 6. Code graph
 
 ### 6.1 Symbol extraction (tree-sitter)
+
+**JavaScript (DECISIONS.md D54).** The TypeScript adapter reads `.js`, `.jsx`, `.mjs` and `.cjs`
+with the TSX grammar. Resolution tries JavaScript extensions after the TypeScript ones, as tsc
+does under `allowJs`. The default tsc check lists JavaScript as a *soft* read. A JS file is
+probed, but if the check does not catch the probe, the file is reported unverified and never
+makes carve refuse the check as vacuous. tsc reads JavaScript only under `allowJs`/`checkJs`,
+per project. Soft files get their own probe slot per folder and their own remembered verdict, and
+hard slots come first under the probe limit. So a JavaScript miss never stands in for, or
+displaces, a TypeScript probe.
 
 **Generic adapter (DECISIONS.md D45).** Files in languages without a tree-sitter adapter (Python, Go, Rust, Java, Kotlin, C, C++, C#, Ruby, PHP, Swift, Scala, Elixir, Lua, Dart) get grammar-free facts: definitions from keyword patterns with indentation extents, imports in common forms, identifiers as references, and name-only resolution to the one other changed file of the same language that defines a name at top level. Default checks by ecosystem apply when no tsconfig exists: `cargo check`, `go build` + `go vet`, `python3 -m compileall -f` (syntax only). Each default check declares the file types it reads; the probe (§8.3) targets only those.
 

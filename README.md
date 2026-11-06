@@ -261,6 +261,12 @@ refuses `--no-verify` too. carve prints the setup and never edits your agent's c
 git carve hooks print claude   # or cursor, codex: merge the printed JSON into its settings
 ```
 
+The Claude Code hook sets `"onFailure": "block"` (Claude Code 2.1.295 or later). Without it, a
+push whose check runs past the hook's 10-minute timeout goes through unchecked. The hook
+command first checks that `git-carve` is installed, so a teammate without it is never blocked.
+carve's own hook never crashes into a block: on its own errors it lets the command run and
+says so.
+
 Agents never write your commit messages. An agent can prepare a re-split from `git carve @{u}
 --plan-only --json` (its `buffer` field), with its suggestions as `# proposed:` comments. You
 open that with `git carve @{u} --plan-file <file> --edit` and write the messages yourself.
@@ -285,6 +291,7 @@ for errors the base did not have. `git config carve.noNewErrors true` does the s
 | Language | How carve reads it | Default check |
 |---|---|---|
 | TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`) | full parser: names resolved through imports | `tsc --noEmit` on the projects that own your changes |
+| JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`) | the same parser (ES modules; CommonJS `require` not yet) | in a TypeScript project, `tsc` proves JS files only under `allowJs`/`checkJs`; the others are reported unverified. A JS-only project: pass `--check "npm test"` |
 | Rust | definitions by keyword, function extents, names matched across changed files | `cargo check --all-targets` |
 | Go | as above | `go build ./... && go vet ./...` |
 | Python | as above | `python3 -m compileall` (syntax only) |

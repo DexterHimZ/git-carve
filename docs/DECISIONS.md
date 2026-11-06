@@ -2093,3 +2093,192 @@ refusing them, when they still form the branch's stack.
 - a failed adoption that moves an earlier layer back;
 - journal recovery;
 - leased pushes, with `--submit` exiting 6.
+
+## D53. `--no-new-errors` as the default (PROPOSED; it amends non-negotiable 3)
+
+**Problem.** The grill's third-hardest hit: on tier-B windows carve refused 27 against 15 scored,
+because HEAD already fails `tsc`. That includes my own repository. A tool that refuses
+its author's repo has no first user. The viability plan puts the flip on the builder track.
+
+**Why it is not active.** Product rule 3 says every commit carve creates passes the
+check, unless `--no-check` is passed. With tolerance on by default, a carve in a repository whose
+HEAD fails creates commits that do not pass. They add no *new* error, but they do not pass. A
+product rule changes only with my sign-off. The flip was built and tested on 2026-10-29, then
+reverted. No outside user can run carve before publication, which also needs my sign-off, so
+waiting costs nothing.
+
+**Proposed amendment to non-negotiable 3:**
+
+> Every commit carve creates passes the check, or, when HEAD already fails it, adds no error
+> HEAD lacks, and the summary says which. `--strict` refuses instead. `--no-check` makes the
+> commits unverified, and the summary says so.
+
+**The flip, once approved (about an hour):**
+- `--strict` restores refusal on run and verify. `--no-new-errors` stays accepted, hidden.
+- `carve.noNewErrors` defaults to true.
+- The hints in verify.rs, main.rs and gate.rs flip their advice.
+- `eval` keeps its explicit flags: the locked protocol measured refusal.
+
+**Review (2026-10-29) of the flip:**
+1. **The failure cache.** Under tolerance, every cached failure without parsed errors was
+   distrusted. That is every failure of a non-tsc check (cargo, go, `make test`), so it re-ran
+   each time.
+   - **Fixed now**, because it also hits opt-in users.
+   - Outcomes record `diagnosed` (`src/check.rs`), so only failures cached before D43 re-run.
+   - Regression test: `no_new_errors_keeps_cached_failures_of_checks_without_parsed_errors`.
+     It fails without the fix.
+2. **Fall back to strict when the baseline can't be parsed.** When the default, not a flag or
+   config, put tolerance on and the base fails without recognizable errors, carve must quietly
+   stay strict. Otherwise a Go repo's push gate errors out about a flag nobody passed.
+   - Part of the flip; not built yet.
+3. Amend non-negotiable 3 and D43 in the same change (above).
+
+## D54. JavaScript through the TypeScript adapter (built 2026-10-29)
+
+**Problem.** A TypeScript tool that could not read `.js` in 2026.
+JavaScript files in TypeScript repositories were invisible: config files, legacy modules, and
+JS-only packages.
+
+**Decision.**
+- **Which files.** The TypeScript adapter also reads `.js`, `.jsx`, `.mjs` and `.cjs`, with the
+  TSX grammar. JavaScript may hold JSX under any of those extensions, and has no `<T>x`
+  assertions for that grammar to misread.
+- **Strict predicates.** `is_typescript` stays strictly TypeScript, and `is_javascript` is new.
+  The "no tsconfig.json" precondition and the corpus injection candidates keep their meaning.
+- **Resolution.** JavaScript extensions come after the TypeScript ones, as tsc looks them up
+  under `allowJs`.
+- **The probe.** The default tsc check lists JavaScript in `reads` and in the new `soft_reads`.
+  - JS files are probed. tsc reads them only under `allowJs` or `checkJs`, per project.
+  - So a probe on a JS file that the check misses marks the file **unverified** (a warning). It
+    never makes carve refuse the check as vacuous.
+  - Scenario: Next.js has `allowJs` but `include: ["**/*.ts", ...]`. A change to only
+    `next.config.js` would otherwise have been refused.
+- **JS-only repositories** still have no default check. The hint now suggests
+  `--check "npm test"`.
+- **Cut, by review: CommonJS** (`require`, `module.exports`). In TypeScript repositories
+  the JS files that change are mostly config files: whole-file atoms that rarely import changed
+  local code. Add it when the dev corpus shows `require('./…')` edges that would have merged
+  something.
+
+**Tests:**
+- unit tests: JS and JSX facts, and resolution order;
+- `tests/languages.rs`:
+  - a JS project links a new helper to its caller;
+  - `next.config.js` alone is unverified, not refused (fails with the soft rule off);
+  - under `allowJs`/`checkJs` the probe proves a `.js` change.
+
+**Invariance (TypeScript output must not change):** the dev corpus
+(`train-manifest-v2`, never test) was replayed with the binaries from before and after.
+- **TypeScript-only windows:** 360 of the 389. None changed: atoms, groups, scores, pairs and
+  leave counts are all identical.
+- **Windows with JS files:** 29 (24 scored). 12 changed.
+  - BCubed F1 on the 24 went from 0.773 to 0.806: 7 better, 2 slightly worse (−0.006 and
+    −0.020).
+  - The largest gain: `tanstack-query:db0023e1f6` went from 0.237 to 0.684, with 28 groups
+    becoming 11, because its JS files now link.
+- **Whole corpus:** E1 went from 0.7394 to 0.7417.
+
+## D55. Agent gate hardening (D50 follow-up, built 2026-10-29)
+
+- `hooks print claude` sets `"onFailure": "block"`. Claude Code lets a timed-out hook through by
+  default. The docs say so: "a timed-out command … hook doesn't block the tool call", and
+  `onFailure` needs v2.1.295 or later. So a check that outlasts the 600 s timeout no longer lets
+  a push through.
+  - The git pre-push hook was never affected: it has no timeout.
+  - Codex and Cursor snippets are unchanged; no such field is documented for them.
+- **Why `hooks run` now fails open on its own errors** (stdin unreadable, a panic, via
+  `catch_unwind`). The hook runs before every shell command, so with `onFailure: block` a carve
+  crash would otherwise block every Bash call, not just pushes. Timeouts stay the agent's to
+  handle.
+- **Test:** `printed_agent_snippets_are_valid_json` pins `onFailure` to the Claude snippet only.
+
+## D56. ARI next to BCubed in the eval (ROADMAP item 5, partly)
+
+- Every scored window records its adjusted Rand index, and runs print the mean. Published
+  commit-untangling results report ARI: AtomicCommitBench gives agents ≤ 0.46 on real
+  tangles. carve's number is now comparable, given the dataset caveats.
+- It is not an EVAL.md metric, and the locked protocol is untouched.
+- **Hungarian-matched accuracy:** not built.
+- **Test:** a worked example, plus the trivial-partition rules.
+
+## D57. Error-guided repair (EXPERIMENT, behind `GIT_CARVE_DEV_ERROR_GUIDED=1`; not shipped)
+
+**Why.** In a head-to-head pilot, a coding agent out-grouped carve on 4 public tune windows (the
+pilot is in my notes). carve's worst loss, hono:1a2c0d58e5, was not parsing. The
+code grouping made 7 groups and every prefix failed `tsc`. Merge-forward (D2) can only fold
+group k into k+1, so it cascaded into 1 commit. The agent read the compiler errors instead.
+
+**What (designed, built in part).** After D51's parallel round, a dev-only phase B walks
+the boundaries in order. At a failing prefix k, it pulls into group k the later groups that the
+check's errors point at, from two tiers:
+- **(a1)** an error line inside an atom that is not applied yet (walking the file in the prefix
+  tree's coordinates);
+- **(a2)** an error line outside every atom that references a same-file definition an
+  unapplied atom changes (tsc reports at the use site).
+
+**Bounds:**
+- up to 3 rounds per boundary, at most 4 groups per pull, and never every remaining atom;
+- a budget of 2n+4 check requests, cached ones included, so a warm cache cannot change the
+  plan;
+- when the repair fails, it merges forward as in D2. The buffer says what moved.
+
+**Deviations from the design:**
+- Tier (b) (quoted symbols) is not built. Neither is the O1/O2 closure, nor exposing the full
+  new-error list under D43 (EG reads the tail).
+- **The cap changed.** "At most half the remaining atoms" blocked the repair the motivating
+  window needs. It is now "never all of them".
+
+**Results (tier B tune, 9 scored windows, cold then warm):**
+- EG changed 1 window: hono:1a2c0d58e5 went from 1 group to 3 (the truth is 2).
+  - E2 merges: 6 → 2.
+  - ARI: 0.000 → 0.545.
+  - BCubed F1: 0.914 → 0.894. Precision went 0.84 → 1.00 and recall 1.00 → 0.81: an
+    under-split became a mild over-split.
+- The other 8 windows are identical.
+- Repeat runs give identical plans.
+- Plan time on tune: 46 ms → 212 ms mean.
+- In the line-level pilot scoring, the same window went from BCubed 0.801 to 0.877 and ARI
+  0.000 to 0.649. The agent scored 1.0 on both.
+
+**The pre-registered pass rule is not met.** The rule was "no window's BCubed falls by more than
+0.02, and at least one rises". The fall is −0.0197, but nothing rose.
+
+**Verdict: inconclusive, n = 1 affected window. EG stays behind the dev flag.**
+
+**Next:**
+- Measure on a corpus where merge-forward fires more often: tier B on the dev train repos, which
+  needs their installs.
+- Then add tier (b) and the O1/O2 closure.
+
+**Test:** `tests/repair.rs`. A fake check reports the missing definition at the line a
+non-adjacent later group adds.
+- Merge-forward gives one commit.
+- EG keeps the unrelated group apart.
+- Warm-cache determinism holds.
+
+**Result review of D54–D57 (2026-10-30).** The review reproduced 3 must-fix findings; all are
+fixed, each with a regression test that fails without the fix:
+1. **D54: probe memory ignored the extension.** A JavaScript probe's miss was remembered under
+   the same key as a TypeScript probe in the same folder.
+   - A later TypeScript-only carve was refused as "vacuous".
+   - The reverse order reported a `.js` file tsc never reads as proved.
+   - **Fix:** soft files get their own slot and remembered key (`…|soft`). TypeScript keys are
+     byte-identical, so remembered verdicts survive.
+   - **Test:** `javascript_and_typescript_probe_verdicts_are_remembered_apart`, both orders.
+2. **D54: a JavaScript file could take a folder's only probe slot from a TypeScript file**
+   (most atoms wins), hiding a vacuous check.
+   - **Fix:** one hard and one soft slot per folder. Hard slots come first under the probe
+     limit.
+   - **Test:** `a_javascript_file_never_takes_the_typescript_probe`.
+3. **D55: with `onFailure: block`, a missing `git-carve` or a failure after the verdict would
+   block every Bash call.**
+   - **Fix:** the Claude snippet runs
+     `command -v git-carve >/dev/null 2>&1 || exit 0; exec git-carve hooks run claude`,
+     as the pre-push script does, and `hooks run` ignores write and flush errors after the
+     verdict.
+   - **Test:** the printed command, run without git-carve on PATH, exits 0.
+
+The rest was sound:
+- D57 is inert with the flag unset, and its bookkeeping and determinism hold.
+- `diagnosed` defaults to false for old cache entries.
+- The ARI formula is correct.
