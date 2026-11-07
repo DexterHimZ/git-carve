@@ -193,4 +193,4 @@ The E2 guard compares both arms on the same tier B windows.
 
 | Date | Change | Reason | Affects results? |
 |---|---|---|---|
-| | | | |
+| 2026-10-30 | Private repository names replaced with aliases (private-repo-A to D) | Privacy | No: names only; no threshold, metric, split or procedure changed |

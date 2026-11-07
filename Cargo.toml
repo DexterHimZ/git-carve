@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.85"
 description = "Turns a branch, yours or your agent's, into commits or a stack of PRs that each pass your check before you push."
 license = "MIT OR Apache-2.0"
-# Flipped at publication (D39): the license and README are decided (D60).
+repository = "https://github.com/DexterHimZ/git-carve"
+# Only what builds the tool goes into the crate: the docs and eval notes name my
+# private repositories and stay out (pre-publish check, 2026-10-30).
+include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/LICENSE-MIT", "/LICENSE-APACHE", "/README.md"]
+# I flip this at publication (D39): the license and README are decided (D60).
 publish = false
 
 [[bin]]

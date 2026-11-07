@@ -1,6 +1,6 @@
 # git-carve: proposal and technical specification (v1)
 
-Status: ready for implementation. Audience: implementers, including Claude Code.
+Status: ready for implementation. Audience: implementers, human or agent.
 Section numbers are referenced from `docs/EVAL.md` and `docs/DECISIONS.md`. Keep them stable.
 
 ---
@@ -46,7 +46,7 @@ distrust.
 > **git carve splits your uncommitted work and proves every commit passes your check,
 > in seconds, and never writes the message.**
 >
-> *Repositioned 2026-10-30 (DECISIONS.md D58–D60, after the product critique): git carve turns
+> *Repositioned 2026-10-30 (DECISIONS.md D58–D60): git carve turns
 > a branch, yours or your agent's, into a stack of PRs that each pass your check before you
 > push; deterministic, undoable, and callable by your agent. carve still generates no message
 > text; the messages come from the plan (the editor, or a filled `--plan-file`).*
@@ -1021,7 +1021,7 @@ DECISIONS.md D22–D26: `git carve eval build` clones the sources into
 windows with per-line provenance and debug injections. `git carve eval run` scores an arm:
 tier A without the check, tier B (`--check`) with dependencies installed into the cache.
 Accept: `eval/results/baseline.json` is written, and the thresholds and decision rules in
-EVAL.md are locked and committed by the user.
+EVAL.md are locked and committed.
 
 **M6 Judge** (0.5–1 day once the API docs exist). Tune thresholds on the tune split,
 implement `LayaJudge` (DECISIONS.md D20), caching, fail-open, and the privacy notice.
@@ -1126,7 +1126,7 @@ commit messages."*
 | Competitor overlap | Positioning on proof and on not writing messages (§3) |
 | Code-only mode leaves intentional logging (§6.5 sends *every* debug candidate to leave, but EVAL E5 requires 0 real code wrongly left, and E5 gated only the judge arm) | Resolved in M2 by DECISIONS.md D8 (precision-first leave rule); E5 is reported for both arms (D3) |
 
-**Open decisions for the user:**
+**Open decisions:**
 
 1. ~~The target language for v1.~~ Resolved: TypeScript (2026-09-23).
 2. ~~Rust as the implementation language.~~ Resolved: Rust (2026-09-23).

@@ -271,7 +271,7 @@ fn javascript_definitions_link_across_files() {
     assert_ne!(group_of("src/other.js"), group_of("src/main.js"), "{doc}");
 }
 
-/// D54 must-change: tsc does not read `next.config.js` (no allowJs). A change to it
+/// D54 review, must-change: tsc does not read `next.config.js` (no allowJs). A change to it
 /// alone is reported as unverified; it is not "a vacuous default check".
 #[test]
 fn a_javascript_file_tsc_skips_is_unverified_not_refused() {
@@ -325,7 +325,7 @@ fn a_javascript_file_under_allow_js_is_proved_by_the_probe() {
     );
 }
 
-/// Result review of D54, finding 1: a JavaScript probe's verdict is remembered apart
+/// D54 result review, finding 1: a JavaScript probe's verdict is remembered apart
 /// from a TypeScript one in the same folder, in both orders.
 #[test]
 fn javascript_and_typescript_probe_verdicts_are_remembered_apart() {

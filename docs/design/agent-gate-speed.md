@@ -1,6 +1,6 @@
 # Design: the agent gate pack and the speed gate (D46 phases 3–4)
 
-Status: **reviewed, queued after phase 2.** Architecture and plan reviewed (2026-10-13);
+Status: **reviewed, queued after phase 2.** Written from the code and reviewed on 2026-10-13.
 
 ## Verified hook APIs (2026-10-13)
 

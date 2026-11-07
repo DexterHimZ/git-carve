@@ -1,7 +1,7 @@
 # Design: `git carve <base>`, re-carve committed work (D46 phase 1)
 
-Status: **reviewed, ready to execute.** Drafted from the code; architecture review
-and execution plan, 2026-10-13. Once it ships, the final decisions go
+Status: **reviewed, ready to execute.** Drafted from the code, then reviewed with an
+execution plan, 2026-10-13. Once it ships, the final decisions go
 into DECISIONS.md D47 and the SPEC sections listed in step 9.
 
 ## 1. What and why
@@ -173,12 +173,12 @@ Every step must leave `cargo test`, `cargo clippy --all-targets -- -D warnings` 
      atoms, groups, leave and edges byte-equal.
    - A hidden `eval range-check --corpus eval/corpus/train-manifest-v2.json --limit 50` on
      real dev windows. It reports mismatches (**must be 0**), `plan_ms` for both paths, and
-     refusal reasons. Record the results in `eval/RESULTS.md` and WORKLOG.
+     refusal reasons. Record the results in `eval/RESULTS.md`.
 9. **Docs:**
    - SPEC §5.1, §5.2, §9.2, §10.1–10.2, §10.5, §11, §13;
    - DECISIONS D47;
    - README ("what rewriting history means here" with the three guarantees);
-   - ROADMAP, WORKLOG;
+   - ROADMAP;
    - a range scene in `scripts/try.sh`.
 
 ## 6. Quality bar

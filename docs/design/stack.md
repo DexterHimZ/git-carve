@@ -1,6 +1,7 @@
 # Design: `git carve <base> --stack` (D46 phase 2)
 
-Status: **reviewed, executing.** Architecture and plan reviewed (2026-10-13). Final decisions go to DECISIONS.md D48 and SPEC §10.6.
+Status: **reviewed, executing.** Written from the code and reviewed on 2026-10-13. Final
+decisions go to DECISIONS.md D48 and SPEC §10.6.
 
 ## Verified facts about `gh stack` (2026-10-13)
 
@@ -93,7 +94,7 @@ and the github/gh-stack README, `skills/gh-stack/SKILL.md` and `cmd/{init,link,s
 6. JSON: the plan stack block and the run report.
 7. Manifest binding (npm, Cargo, go), plus `eval range-check` and the tune BCubed delta.
 8. Docs (SPEC §10.6, §10.4, §11 and exit 6, §6.3 B3, §13; DECISIONS D48; README "From a
-   branch to a stack" with a Graphite recipe; ROADMAP; WORKLOG), the try.sh scene, and the
+   branch to a stack" with a Graphite recipe; ROADMAP), the try.sh scene, and the
    queue batch with a rehearsal.
 
 **What makes people stop using it:** slow checks (phase 4), branch litter (`gh stack sync

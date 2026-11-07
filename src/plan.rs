@@ -694,8 +694,8 @@ impl Fnv {
 /// human's own typing can fill a message. Comments, atom lines, and blank lines stay.
 pub fn messages_as_proposals(text: &str) -> String {
     // The same lexing as `blocks()`: CRLF, a trimmed `commit`/`leave`, `#` comments, atom
-    // lines, and message lines anywhere in a commit block, before or after its atoms (the
-    // review of D58: a message below the `@` lines had slipped through).
+    // lines, and message lines anywhere in a commit block, before or after its atoms (the D58
+    // review: a message below the `@` lines had slipped through).
     let mut in_commit = false;
     let mut cut = false;
     let mut out = String::with_capacity(text.len());
@@ -722,7 +722,7 @@ pub fn messages_as_proposals(text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Review of D58: no message line survives as a message, wherever it sits.
+    /// D58 review: no message line survives as a message, wherever it sits.
     #[test]
     fn proposals_cover_messages_after_atoms_and_crlf() {
         let text = "commit\r\n  @ a1   x.ts:1\r\nAgent wrote this\r\n  commit  \nfirst\n  @ a2   y.ts:2\nleave\n  @ a3   z.ts:3\n";

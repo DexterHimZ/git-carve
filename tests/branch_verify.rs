@@ -524,7 +524,7 @@ fn verify_tolerates_the_bases_errors_by_default_and_config_makes_it_strict() {
     assert_eq!(passed(&run(&repo)), vec![false]);
 }
 
-/// D53 must-change: when tolerance is only the default and the base fails without
+/// D53 review, must-change: when tolerance is only the default and the base fails without
 /// errors carve can compare (a plain check), verify stays strict instead of erroring; asking
 /// for tolerance explicitly still says there is no baseline.
 #[test]

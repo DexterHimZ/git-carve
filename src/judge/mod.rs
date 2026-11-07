@@ -432,9 +432,13 @@ pub enum Linkage {
 }
 
 /// The frozen rung-1 judge (`eval/LOCK`), compiled in so `--judge` needs no files, no network,
-/// and no model download (DECISIONS.md D33).
+/// and no model download (DECISIONS.md D33). Only in `eval` builds (D60): the published crate
+/// carries `src/` alone, and `--judge` is an eval flag.
+#[cfg(feature = "eval")]
 const BUILTIN_WEIGHTS: &[u8] = include_bytes!("../../eval/judge/weights-v1.json");
+#[cfg(feature = "eval")]
 const BUILTIN_THETA: f64 = 0.7;
+#[cfg(feature = "eval")]
 const BUILTIN_PLATT: (f64, f64) = (0.821601, 0.480245);
 
 /// A logistic model over [`FEATURES`], loaded from a reviewed weights file.
@@ -564,6 +568,7 @@ impl LearnedJudge {
     }
 
     /// The built-in judge behind `--judge`: exactly the one frozen in `eval/LOCK`.
+    #[cfg(feature = "eval")]
     pub fn builtin() -> Self {
         Self::from_json(
             BUILTIN_WEIGHTS,
@@ -740,6 +745,7 @@ mod tests {
         assert_eq!(FEATURES.len(), 21);
     }
 
+    #[cfg(feature = "eval")]
     #[test]
     fn the_builtin_judge_is_the_frozen_one() {
         let lock = include_str!("../../eval/LOCK");

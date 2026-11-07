@@ -276,7 +276,7 @@ placed by the post-pass. No repo-wide scan.
 ## D11. Code-only mode stops merging on F2; F2 pairs become judge proposals (M2)
 
 **Data (tune-split windows only, never test).** First measurement on 34 tune windows from
-the user's TypeScript repositories: 3 consecutive commits by one author, at most 15 files,
+my TypeScript repositories: 3 consecutive commits by one author, at most 15 files,
 ground truth from `git blame`. Pairwise F1 is 0.67 (precision 0.66, recall 0.81), and
 BCubed F1 is 0.76. Trivial references: everything in one commit scores 0.45 pairwise F1,
 every atom alone scores 0.18.
@@ -427,10 +427,10 @@ with no `.git` file confuses git's discovery. And the spec wins on conflicts.
 about the user's files. `.git/worktrees/` holds git metadata, not user files, so the
 enumerated list is narrower than the rule's intent. Follow the spec: a registered,
 detached worktree created with `--no-checkout`, filled by `read-tree -u --reset`. carve
-prunes stale registrations, and `--clean` removes it. Point out the wording conflict to the
-user and propose adding "the scratch worktree's registration" to the list.
+prunes stale registrations, and `--clean` removes it. Point out the wording conflict and
+propose adding "the scratch worktree's registration" to the list.
 
-**Decision.** Registered worktree. The conflict is flagged in WORKLOG.md for the user.
+**Decision.** Registered worktree. Non-negotiable 2 was amended to list the registration.
 
 ## D16. Show each atom's diff in the plan buffer, below a scissors line (M4)
 
@@ -499,7 +499,7 @@ tool's own history.
 language-independent: the plan buffer, `--plan-file`, verification with a real compiler
 through merge-forward, commit, CAS, and undo. That is exactly M4's surface. The history
 risk is covered by undo and the reflog. Developer messages go through `--plan-file`: carve
-writes none, and the developer (Claude, here) writes them. If it fails, fall back to plain
+writes none, and the developer writes them. If it fails, fall back to plain
 git and log the bug as a finding.
 
 **Decision.** From the end of M4, commit through `git carve`.
@@ -521,21 +521,20 @@ Counts and timings go to the final summary line and to `--json`.
 
 **Decision.** Fixed in M4.
 
-## D18 correction (2026-09-23): no commits in the user's repository
+## D18 correction (2026-09-23): no commits in this repository yet
 
-The user ruled that nothing is committed in this repository until they say so (at the end of
-the project, or on request), and that commit messages never mention Claude. A commit made
-earlier was removed: the branch ref was deleted, the index
-cleared, and the working tree left byte-identical.
+I decided that nothing is committed in this repository until I say so (at the end of the
+project, or on request). A commit made earlier was removed: the branch ref was deleted, the
+index cleared, and the working tree left byte-identical.
 
 Dogfooding therefore changes shape. carve's own work stays uncommitted, and dogfood runs
 that need commits happen only in throwaway copies under `/tmp`: the real-history windows
-from the user's TypeScript repos (M5 harness), and scratch clones like `scripts/try.sh`. The
-goal is the same (real use, not fixtures) without touching the user's history.
+from my TypeScript repos (M5 harness), and scratch clones like `scripts/try.sh`. The
+goal is the same (real use, not fixtures) without touching my history.
 
 ## D20. The judge is Laya, reached over its Jev-compatible HTTP protocol (M6)
 
-**Context (user decision, 2026-09-24).** The judge changes from TypeSafe Jev (a closed,
+**Context (decided 2026-09-24).** The judge changes from TypeSafe Jev (a closed,
 hosted API) to **Laya** (github.com/NandhaKishorM/laya, Apache-2.0).
 
 Research findings:
@@ -615,13 +614,13 @@ decisions.
 - The labels are noisy: humans tangle commits (the EVAL threat to validity).
 - A model trained on commit habits may not transfer to other developers.
 - A full fine-tune of the 421M checkpoint probably does not fit in 8 GB.
-- Worst of all, training on the user's repos would contaminate the pre-registered eval.
+- Worst of all, training on my repos would contaminate the pre-registered eval.
 - And a tiny model over carve's own features might capture most of the learnable signal,
   with no server at all.
 
 **Round 3 (synthesis): a ladder, cheapest rung first, on data that cannot leak.**
 0. **Training data:** mined from open-source TypeScript repositories **disjoint from the EVAL
-   corpus** (checked by root commit), never from the user's repos or any eval window.
+   corpus** (checked by root commit), never from my repos or any eval window.
 1. **Features only:** logistic regression over carve's own pair features (edge kinds, same
    file, line distance, enclosing, path similarity, shared new symbols). If this wins, it
    ships inside carve in Rust: deterministic, no server, "code before model."
@@ -656,7 +655,7 @@ and the product binary grows.
 `eval/dev/` keeps Python for exploration. The decisive argument is **leakage by
 construction**. Every source in `eval/sources.json` has a role (`eval-user`, `eval-oss`,
 `train`). The builder refuses a `train` source whose root commit matches any eval source,
-and it clones every source into a cache, so the user's repositories are only ever read.
+and it clones every source into a cache, so my repositories are only ever read.
 
 **Decision.** `git carve eval build | run` in Rust (a hidden subcommand), with per-line
 provenance computed once at build time and mapped onto atoms at run time.
@@ -725,7 +724,7 @@ used to choose them.
 
 ## D26. F6 systematic edits; D11 reversed by its own rule (M5, tune split only)
 
-**Finding.** On the M5 tune split (66 windows; hono 41, zustand 14, the user's repos 11),
+**Finding.** On the M5 tune split (66 windows; hono 41, zustand 14, my repos 11),
 code-only mode over-splits badly. Pairwise recall is 0.24, and the plan has about 6 more
 groups than true commits. The worst tune window, one hono feature commit touching 14 files,
 became 52 groups. Its edits change type parameters without adding or removing names, and
@@ -755,7 +754,7 @@ directory.
 
 - **Collisions:** F6 *raises* precision (0.880 → 0.898), so they are rare in practice. The
   substitution key also excludes numbers and requires a 3+ character word.
-- **Hono overfit:** F6 helps hono (+0.03) and zustand (+0.06). The user's repos are unchanged
+- **Hono overfit:** F6 helps hono (+0.03) and zustand (+0.06). My repos are unchanged
   (n = 11, too few to move).
 
 **D11 re-validation.** D11 promised to restore F2 merging if it improves tune F1 by more than
@@ -771,11 +770,11 @@ precisely so that preference would not decide.
 
 ## D27. The default check covers the projects that own the changed files (proposed; M5 finding)
 
-**Finding (tier B, test split).** The D1 probe refused 13 windows, 10 of them in the user's
+**Finding (tier B, test split).** The D1 probe refused 13 windows, 10 of them in my
 own `private-repo-A` repo. Its root `tsconfig.json` includes only `src*`, so edits under
 `frontend/` (a project with its own tsconfig) and `scripts/` (no project at all) are not
 read by `tsc -p .`. D1 then exits 3 for *any* carve touching those directories: carve would
-be unusable on the user's own repository.
+be unusable on my own repository.
 
 **Round 1 (keep D1 strict).** Every commit carve makes must pass a check that actually reads
 it. A check that can't see a file proves nothing about it.
@@ -783,7 +782,7 @@ it. A check that can't see a file proves nothing about it.
 **Round 2 (against).** Refusing is the wrong remedy when carve *could* build a check that
 reads the file. `frontend/` has its own `tsconfig.json`, so checking that project too is
 exactly what my own workflow does (`cd frontend && tsc`). And `scripts/` is type-checked by
-nothing in the user's own setup, so demanding proof for it is stricter than the user is.
+nothing in my own setup, so demanding proof for it is stricter than I am.
 
 **Round 3 (synthesis).**
 - The default check becomes: the root project (if it has inputs) plus every project that owns
@@ -807,7 +806,7 @@ both splits and the change is logged in EVAL.md, as D25 requires.
 - Tier A code-arm metrics were identical after the change (re-run on both splits per D25;
   source hash d2f6a14a4a8c → 56f76184e62a).
 - On tier B, my `private-repo-A` windows are no longer refused by the probe. They now stop
-  at the check, because tier B does not install sub-project lockfiles; on the user's machine
+  at the check, because tier B does not install sub-project lockfiles; on my machine
   those dependencies exist.
 
 ## D28. The judge, rung 1: a learned merge model over carve's own signals (M6)
@@ -951,7 +950,7 @@ would gain at most about 0.03, and only on sources with 2–4 tune windows. D29 
 split except tune unless `eval/LOCK` freezes that exact judge.
 
 **Round 1 (for).** A pre-registration kept on the honor system is weak. Once the test numbers
-exist, anyone can reinterpret a rule. So the command:
+exist, anyone, me included, can reinterpret a rule. So the command:
 - reads Δ_headline, Δ_optional, P_debug_min, and the bootstrap seed from `docs/EVAL.md`;
 - refuses if that file's SHA-256 differs from `eval/LOCK`;
 - checks that each input file is the right arm, split, and tier;
@@ -994,7 +993,7 @@ no network, and no model download.
   and the model only weighs code facts for the soft merges code cannot settle.
 
 **Round 2 (against).**
-- The user chose Laya as the judge, and this would ship something that is not Laya.
+- I chose Laya as the judge, and this would ship something that is not Laya.
 - The weights come from five MIT-licensed OSS repositories. They may not fit a given
   developer's habits (D29).
 - "A model trained on other people's history decides my commits" must be explainable.
@@ -1020,7 +1019,7 @@ no network, and no model download.
 needs data that no decision has touched. Windows from commits made *after* the freeze in the
 same sources are unseen by construction, and they also measure drift over time.
 
-**Round 1.** It is free: hono and zustand are active, and so are the user's repos. Keeping
+**Round 1.** It is free: hono and zustand are active, and so are my repos. Keeping
 the same sources keeps the populations comparable.
 
 **Round 2.** Dates can lie (rebases, bad clocks). Recent windows are a different distribution
@@ -1277,7 +1276,7 @@ Shipping an untested platform contradicts "fail closed".
 **Decision.** Built: `npm/git-carve/`, `scripts/npm-pack.mjs` (tested locally with an npm-like
 layout: `--version`, exit codes, and a real plan), and `.github/workflows/release.yml`.
 
-**Before any publish:**
+**Before publishing:**
 - a license (`Cargo.toml` has none; the npm packages say `UNLICENSED`);
 - the npm organization `@git-carve`;
 - the `NPM_TOKEN` and `CARGO_REGISTRY_TOKEN` secrets;
@@ -1410,7 +1409,7 @@ test: error-path logging is committed, and a stray print beside it is still left
 **Finding (tier B, both splits).** Among windows whose dependencies installed, 27 were refused
 because the check failed on the final tree, against 15 scored. D40's reordering showed the
 cause: **HEAD fails too.**
-- These are real projects' committed trees with genuine, long-lived type errors. The user's own
+- These are real projects' committed trees with genuine, long-lived type errors. My own
   private-repo-B has 8 × TS18046 at HEAD. Next and Vite build despite type errors, so they
   persist.
 - With the default check, carve refused before looking at the user's changes. This is the
@@ -1450,11 +1449,12 @@ errors), and 1 is skipped by the harness's mixed-atom rule.
 
 **Open:** should carve switch to no-new-errors *automatically* when HEAD fails
 (with the same loud wording), instead of refusing and offering the flag? That changes the
-reading of non-negotiable 3, so it is my call.
+reading of non-negotiable 3, so it is a product decision, not an implementation detail
+(resolved in D53).
 
 ## D44. `git carve verify`: every commit on a branch passes the check (research item 1)
 
-**Idea (from the viability research, 2026-10-07).** Local git CLIs plateau at a few thousand
+**Idea (2026-10-07).** Local git CLIs plateau at a few thousand
 installs. Real reach comes from becoming a project dependency that runs on every push or in
 CI. "Every commit passes the check" is carve's one unclaimed guarantee, so apply it to commits
 that already exist as well: check each commit of a range, oldest first.
@@ -1499,8 +1499,8 @@ the default range now uses.
 
 **Finding.** On a Python repository carve fell back to one commit per file. It split a new
 function from its uses and its test, lumped a drive-by fix in with the feature, showed no
-function names, and refused to check at all, with a TypeScript hint (`npx tsc`). The
-viability research ranked "TypeScript only" as a top risk: every successful git tool is
+function names, and refused to check at all, with a TypeScript hint (`npx tsc`).
+"TypeScript only" is a top risk: every successful git tool is
 language-agnostic.
 
 **Round 1 (for).** Most developers who would find carve on GitHub or HN do not write
@@ -1581,8 +1581,8 @@ pre-registered variants; never the locked corpus).**
 ## D46. Product direction: from any big change to a verified stack (2026-10-13)
 
 **Question.** Are carve's features ones people would love and use weekly, or are they
-impressive but unused? Two research agents gathered evidence (developer demand, the competitive
-map as of October 2026) and one strategy agent argued independently before this decision.
+impressive but unused? Evidence was gathered first (developer demand, the competitive map as
+of October 2026), and the strategy was argued from it before this decision.
 
 **Evidence, strongest first:**
 1. **AI-sized PRs choke review.**
@@ -1675,8 +1675,8 @@ map as of October 2026) and one strategy agent argued independently before this 
    - block `git push` until `git carve verify` passes, which needs no new ruling;
    - a "carve before you push" recipe through `--plan-only --json` and `--plan-file`.
 
-   **Pending ruling: may an agent fill the message lines of the plan file?** carve
-   itself still writes none.
+   **Open question (resolved in D49 and D58): may an agent fill the message lines of the plan
+   file?** carve itself still writes none.
 4. **Gate, not feature: speed.** Reuse incremental build state in the scratch worktree. A
    3–5-commit carve should take at most about 2× one check.
 
@@ -1703,7 +1703,7 @@ review found:
 - answers to the open questions;
 - a 9-step plan that keeps the build green at every step.
 
-Then it was built. The design record is `docs/design/carve-range.md`.
+The design record is `docs/design/carve-range.md`.
 
 **Decisions.**
 1. **The snapshot gets a base next to its head** (SPEC §5.6).
@@ -1776,8 +1776,8 @@ check on real use. Run `git carve @{u} --plan-only` (then one committed run and
 
 ## D48. `git carve <base> --stack`: a checked stack of PRs (D46 phase 2, built 2026-10-13)
 
-**Process.** It was designed after verifying `gh stack` from GitHub's docs and the
-gh-stack source (`cmd/init.go`, `cmd/submit.go`, `skills/gh-stack/SKILL.md`). Then it was built.
+**Process.** The design was written after verifying `gh stack` from GitHub's docs and the
+gh-stack source (`cmd/init.go`, `cmd/submit.go`, `skills/gh-stack/SKILL.md`).
 Design record: `docs/design/stack.md`.
 
 **Facts that shaped it.**
@@ -1868,7 +1868,7 @@ layers, retyping the messages and force-pushing again. A re-carve that adopts th
 `<branch>-<k>` layers (CAS-moves them, so their PRs survive) is on ROADMAP.md as the next
 stack feature.
 
-## D49. Agents may draft commit messages; a human authors them, unless the repository opts in (ruling, 2026-10-13)
+## D49. Agents may draft commit messages; a human authors them, unless the repository opts in (2026-10-13)
 
 **The question** (pending since D46): when an agent drives carve, may it fill the message lines
 of the plan file?
@@ -1973,8 +1973,7 @@ git's own pre-push hook covers all of them, and `verify --pre-push` exists (D44)
 - **Parallel checks:**
   - `Checker::check_many` checks up to `jobs` trees at once, in worker worktrees
     `<git-path carve>/w<k>/scratch`. Like the scratch worktree, each is registered under
-    `.git/worktrees/` (D15's wording covers one; this is the same kind of write, flagged to
-    me).
+    `.git/worktrees/` (D15's wording covers one; this is the same kind of write).
   - Base and final share the first round. Spare workers check prefixes ahead of need. The
     probe trees share rounds with the remaining prefixes.
   - A tree's outcome depends only on the tree, so the order of decisions and the plan are
@@ -2096,16 +2095,16 @@ refusing them, when they still form the branch's stack.
 
 ## D53. `--no-new-errors` as the default (BUILT 2026-10-30; amends non-negotiable 3)
 
-**Problem.** The grill's third-hardest hit: on tier-B windows carve refused 27 against 15 scored,
+**Problem.** On tier-B windows carve refused 27 against 15 scored,
 because HEAD already fails `tsc`. That includes my own repository. A tool that refuses
-its author's repo has no first user. The viability plan puts the flip on the builder track.
+its author's repo has no first user.
 
-**Why it is not active.** Product rule 3 says every commit carve creates passes the
+**Why it was not active at first.** Product rule 3 says every commit carve creates passes the
 check, unless `--no-check` is passed. With tolerance on by default, a carve in a repository whose
 HEAD fails creates commits that do not pass. They add no *new* error, but they do not pass. A
-product rule changes only with my sign-off. The flip was built and tested on 2026-10-29, then
-reverted. No outside user can run carve before publication, which also needs my sign-off, so
-waiting costs nothing.
+product rule does not change as a side effect of a build. The flip was built and tested on
+2026-10-29, then reverted until the rule was amended (below). No outside user can run carve
+before publication, so waiting cost nothing.
 
 **Proposed amendment to non-negotiable 3:**
 
@@ -2113,7 +2112,7 @@ waiting costs nothing.
 > HEAD lacks, and the summary says which. `--strict` refuses instead. `--no-check` makes the
 > commits unverified, and the summary says so.
 
-**The flip, once approved (about an hour):**
+**The flip (about an hour):**
 - `--strict` restores refusal on run and verify. `--no-new-errors` stays accepted, hidden.
 - `carve.noNewErrors` defaults to true.
 - The hints in verify.rs, main.rs and gate.rs flip their advice.
@@ -2151,7 +2150,7 @@ JS-only packages.
   - JS files are probed. tsc reads them only under `allowJs` or `checkJs`, per project.
   - So a probe on a JS file that the check misses marks the file **unverified** (a warning). It
     never makes carve refuse the check as vacuous.
-  - Scenario: Next.js has `allowJs` but `include: ["**/*.ts", ...]`. A change to only
+  - Example: Next.js has `allowJs` but `include: ["**/*.ts", ...]`. A change to only
     `next.config.js` would otherwise have been refused.
 - **JS-only repositories** still have no default check. The hint now suggests
   `--check "npm test"`.
@@ -2203,12 +2202,12 @@ JS-only packages.
 
 ## D57. Error-guided repair (EXPERIMENT, behind `GIT_CARVE_DEV_ERROR_GUIDED=1`; not shipped)
 
-**Why.** In a head-to-head pilot, a coding agent out-grouped carve on 4 public tune windows (the
-pilot is in my notes). carve's worst loss, hono:1a2c0d58e5, was not parsing. The
+**Why.** In a head-to-head pilot, a coding agent out-grouped carve on 4 public tune windows.
+carve's worst loss, hono:1a2c0d58e5, was not parsing. The
 code grouping made 7 groups and every prefix failed `tsc`. Merge-forward (D2) can only fold
 group k into k+1, so it cascaded into 1 commit. The agent read the compiler errors instead.
 
-**What (designed, built in part).** After D51's parallel round, a dev-only phase B walks
+**What (built in part).** After D51's parallel round, a dev-only phase B walks
 the boundaries in order. At a failing prefix k, it pulls into group k the later groups that the
 check's errors point at, from two tiers:
 - **(a1)** an error line inside an atom that is not applied yet (walking the file in the prefix
@@ -2278,18 +2277,18 @@ fixed, each with a regression test that fails without the fix:
      verdict.
    - **Test:** the printed command, run without git-carve on PATH, exits 0.
 
-The rest was sound:
+The review found the rest sound:
 - D57 is inert with the flag unset, and its bookkeeping and determinism hold.
 - `diagnosed` defaults to false for old cache entries.
 - The ARI formula is correct.
 
 
-**D53, built (2026-10-30).** I approved the flip on 2026-10-30.
+**D53, built (2026-10-30).** I approved the flip and amended non-negotiable 3.
 - **The setting.** Tolerance is the default.
   - `--strict` (run and verify) or `git config carve.noNewErrors false` restores refusal.
   - `--no-new-errors` stays accepted, hidden.
   - `branch::tolerance()` returns (on, by default).
-- **Must-change 2 is built.** When tolerance is only the default and the base fails
+- **The review's must-change 2 is built.** When tolerance is only the default and the base fails
   without errors carve can compare, `verify` stays strict instead of erroring. The carve run
   already refused in that case, as strict does, with a hint that says why.
 - **Non-negotiable 3 now reads as proposed.**
@@ -2302,12 +2301,11 @@ The rest was sound:
 ## D58. Agent-filled messages by default; `carve.requireHumanMessages` opts back in (reverses D49's default)
 
 **Why.**
-- The grill's ranked hit 2: "refuses to write your commit messages" fights mass behavior.
+- "Refuses to write your commit messages" fights mass behavior.
   Agents write messages by default, at least 14–15M public commits a month carry the Claude
   Code trailer, and the kernel and Mesa relaxed their rules.
 - When an agent wrote the code, the agent knows why.
 - The D49 contortions kept the slogan, not a user.
-- Without it, both the stack and the engine shapes fail.
 
 **Decision (non-negotiable 1, amended):**
 - carve still generates no text.
@@ -2354,7 +2352,7 @@ applied through `--plan-file` with filled messages (D58):
 - **The tryout script drops its judge scene.**
 - **License: MIT OR Apache-2.0,** the Rust convention, in the npm packages too. The texts are
   copied from the canonical files in the local cargo registry. `publish = false` stays until
-  my go-ahead at publication, which needs their tokens.
+  publication.
 
 ## D61. F8: a barrel line goes with the new module it names (2026-10-30)
 

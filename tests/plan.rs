@@ -421,8 +421,8 @@ fn require_human_messages_refuses_filled_plan_files_without_the_editor() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(repo.run(&["rev-parse", "HEAD"]), head, "nothing committed");
 
-    // Messages below the atom lines, with CRLF endings, are proposals too (review of
-    // D58): saving untouched still aborts.
+    // Messages below the atom lines, with CRLF endings, are proposals too (the D58
+    // review): saving untouched still aborts.
     // Every commit block gets its message after its atoms; `leave` gets none.
     let mut below = String::new();
     let mut in_commit = false;

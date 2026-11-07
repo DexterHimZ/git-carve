@@ -1,5 +1,5 @@
-<!-- DRAFT (M7). Not published. Before publishing: record the demo (docs/demo.tape), re-verify
-§3.4 of docs/SPEC.md, and check private repository names under eval/. -->
+<!-- DRAFT (M7). Not published. Before publishing: record the demo (docs/demo.tape) and re-verify
+§3.4 of docs/SPEC.md. -->
 
 # git carve
 

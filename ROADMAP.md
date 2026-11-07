@@ -1,15 +1,14 @@
 # git carve roadmap
 
 What is done, what is in progress, and what is planned. Update this file whenever an item
-changes state. The design debate behind each item lives in `docs/DECISIONS.md` (D-numbers),
-and the dated history lives in `WORKLOG.md`.
+changes state. The design debate behind each item lives in `docs/DECISIONS.md` (D-numbers).
 
 ## In progress
 
 **Direction (2026-10-30, D58–D60):** *turn a branch, yours or your agent's,
 into a stack of PRs that each pass your check before you push; deterministic, undoable,
-callable by your agent.* It comes from a product critique, a pre-registered study of 40 public
-agent PRs, and a carve-vs-agent pilot.
+callable by your agent.* It comes from a pre-registered study of 40 public agent PRs and a
+carve-vs-agent pilot.
 - **For it:** agents' PRs hold material for passing stacks (72% have ≥ 2 layers).
 - **Against the old pitch:** agents pushed no red intermediate commits (0 of 14).
 - **Open:** a strong agent grouped better in the pilot.
@@ -20,9 +19,8 @@ agent PRs, and a carve-vs-agent pilot.
 3. [x] D59: `--layers` (default 5).
 4. [x] D60: eval and judge out of the user binary; MIT OR Apache-2.0.
 5. [x] The README leads with stacks.
-6. [ ] Publish: npm and crates.io, after my go-ahead and tokens (D39).
-7. [ ] Outside users: 10 people who run agents on TypeScript; go/kill on 2026-11-12, against
-   the critique's criteria.
+6. [ ] Publish: npm and crates.io (D39).
+7. [ ] Outside users: 10 people who run agents on TypeScript; go/kill on 2026-11-12.
 8. [ ] Error-guided repair (D57) to its pass rule: a tier-B dev corpus, plus tier (b).
 
 ## Planned (in order)
@@ -99,9 +97,9 @@ agent PRs, and a carve-vs-agent pilot.
 | Pre-registered evaluation harness and locked protocol | M5, D22–D25 | |
 | Learned judge (rung 1) behind `--judge`, with merge explanations and unsure notes | M6, D28–D33, D30 | verdict: optional, provisional |
 | Real-tree capture that writes nothing to the user's repository | D36 | |
-| npm packaging (no install scripts) and the release workflow | D39 | publishing waits for my go-ahead |
+| npm packaging (no install scripts) and the release workflow | D39 | not yet published |
 | Viability research (five workstreams) | 2026-10-07 | |
 | Branch verification: `git carve verify` (range, pre-push, CI, `--no-new-errors`, names the commit that introduced each error) | D44, 2026-10-07 | 8 tests; a cached re-run takes 0.26 s on the demo |
 | Languages beyond TypeScript: keyword-based reading for 20+ languages, default checks for Rust, Go, and Python, files the check does not read reported as unverified | D45, 2026-10-08 | polyglot BCubed 0.764 → 0.783, better in all 5 repos; TypeScript unchanged (0.803) |
 | Re-carve committed work: `git carve <base>` (commits since the base plus uncommitted changes), old commits listed and attributed per block, `--rewrite-pushed`, exact undo | D46 phase 1, D47, 2026-10-13 | 217 tests; on 500 real windows the plan equals the evaluated path (494 identical, 5 expected asset differences, 0 mismatches) |
-| Stack output: `git carve <base> --stack [--submit]`, one checked branch per commit for `gh stack` or plain `gh pr create`, exact undo, exit 6 on a failed submit, JSON run report; B5 binds new dependency uses to their manifest line | D46 phase 2, D48, 2026-10-13 | 255 tests after the review's result review (5 fixes, 2026-10-14); B5 changes 0 of 461 TypeScript dev windows and 17 of 584 polyglot windows (BCubed 0.7831 → 0.7859, unchanged by the fixes) |
+| Stack output: `git carve <base> --stack [--submit]`, one checked branch per commit for `gh stack` or plain `gh pr create`, exact undo, exit 6 on a failed submit, JSON run report; B5 binds new dependency uses to their manifest line | D46 phase 2, D48, 2026-10-13 | 255 tests after the result review (5 fixes, 2026-10-14); B5 changes 0 of 461 TypeScript dev windows and 17 of 584 polyglot windows (BCubed 0.7831 → 0.7859, unchanged by the fixes) |

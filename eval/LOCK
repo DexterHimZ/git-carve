@@ -3,7 +3,8 @@
 # allowed, each logged in EVAL.md §8. The judge arm (M6) may not run on the test split until a
 # trained judge is frozen here too (weights, revision or file hash, training-repo list).
 locked_at: 2026-09-24
-eval_md_sha256: eb85109d0edf417e6f143d5b515f1180ee5666798e818b57f92fe814b52eaa73
+eval_md_sha256: eb811b23d32b762e8796e3a218c47cf410220b65b311bc2f90eede795bd90462
+eval_md_amended: 2026-10-30, names replaced with aliases (EVAL.md §8); sha256 at the lock eb85109d0edf417e6f143d5b515f1180ee5666798e818b57f92fe814b52eaa73
 corpus_manifest_sha256: f294c4366fbbf6754cbb6cfc82d0a4df680529f11c587a65b43fb203f14eb96d
 code_arm_source_sha256: 56f76184e62ae86596752bdcf72a14808e2c53642a8dea52f82fb09494c8d6a9
 judge: frozen 2026-09-24, before step 4 (DECISIONS.md D21 ladder, rung 1 = D28 learned merge model; D31 linkage; D32 run guard)
