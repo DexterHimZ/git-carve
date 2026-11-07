@@ -3,25 +3,39 @@
 
 # git carve
 
-**Splits your mess into commits that each pass your check. Refuses to write your commit messages.**
+**Turns a branch, yours or your agent's, into a stack of PRs that each pass your check before
+you push. Deterministic, undoable, and callable by your agent.**
 
-After two hours of work (yours or your agent's), `git status` lists nine files. In them: a new
-feature, a rename across six files, a one-line bug fix, and two `console.log`s you forgot to
-delete. You could spend ten minutes in `git add -p` and hope each commit still compiles. Or:
+Your agent just finished: one branch, a few hundred lines across a dozen files, one or two
+commits named `wip`. Reviewers want small PRs, and GitHub now stacks them, but splitting by hand
+is slow, and nothing tells you a middle layer is broken until CI goes red after the push. Or:
 
 ```console
-$ git carve
+$ git carve main --stack
+Stack on main (3 layers, each passed `tsc --noEmit -p .`):
+  feat-1-rename-fmtbytes-to-formatbytes    14d9833  Rename fmtBytes to formatBytes
+  feat-2-retry-failed-fetches-with        c45e573  Retry failed fetches with backoff
+  feat                                     e7b10b9  Fix off-by-one in parseHeader   (top)
 ```
 
-carve reads the code, splits the changes into commits, **runs your check on every one of them
-before it exists** (by default, your compiler or type checker), and opens your editor once. You
-type the messages. It never writes a word of them.
+carve reads the code, groups the changes, **runs your check on every layer before it exists**
+(by default, your compiler or type checker), and makes one branch per layer, at most five unless
+you say otherwise. It prints the `gh stack` or `gh pr create` commands and pushes nothing.
+Run it again after review and it moves the same branches, so the PRs keep their numbers.
+`git carve --undo` puts everything back.
+
+The messages come from whoever writes the plan: you, in your editor, or your agent, in a plan
+file. carve itself generates no text and records which it was.
 
 > **The code decides the grouping. Your check decides what passes. You decide what to say.**
 
 <!-- demo recording goes here (docs/demo.tape) -->
 
-## See it
+## Or just your working tree
+
+After two hours of work, `git status` lists nine files: a new feature, a rename across six
+files, a one-line bug fix, and two `console.log`s you forgot to delete. `git carve` splits them
+into commits that each pass the check and opens your editor once for the messages.
 
 ```console
 $ git status --short
@@ -88,20 +102,23 @@ change the grouping, carve checks again before it commits anything.
   Small commits are how reviewers keep up.
 - **Splitting by hand is slow, and nothing checks it.** `git add -p` can't tell you whether the
   commit you just staged compiles.
-- **AI split tools write your messages and skip your check.** They group changes with a
-  language model and generate the message. At most, they *ask* the model to keep each commit
-  buildable; none we found runs your check on each commit. carve does it the other way round.
+- **Stacks are checked after the push.** GitHub's stacked PRs and agents that open stacks run
+  CI on each layer once it is pushed. carve proves every layer locally first, in seconds,
+  without a model, and the same tree always gives the same plan.
 
 ## What it promises
 
 - **Every commit passes your check.** carve runs the check on each commit's exact tree, in a
-  scratch worktree, before it commits anything. With `--no-check`, the summary says the commits
-  are unverified.
+  scratch worktree, before it commits anything. When HEAD already fails the check, every commit
+  instead adds no error HEAD lacks, and the summary says so (`--strict` refuses instead). With
+  `--no-check`, the summary says the commits are unverified.
 - **It checks the check.** Before trusting a check, carve breaks a changed source file on
   purpose and makes sure the check fails. When the check can't see a file, carve says that
   file's changes are unverified instead of calling them passed.
-- **It never writes a commit message.** There is no `-m`, no suggestion, no summary. The buffer
-  shows paths, line ranges, and function names, and every word of the message is yours.
+- **It generates no message text.** There is no `-m`, no suggestion, no summary. The messages
+  come from the plan: you in the editor, or whoever filled `--plan-file`, and the undo record
+  and reflog say which. `git config carve.requireHumanMessages true` takes messages only from
+  the editor.
 - **It never touches your files.** carve writes git objects, the branch ref (compare-and-swap),
   the index once at the end, and its own files under `.git/carve`.
 - **`git carve --undo` restores the exact state before the run.**
@@ -174,10 +191,10 @@ $ git carve main --stack
 ...
 Stack on main (3 layers, each passed `tsc --noEmit -p .`):
   feat-1-rename-fmtbytes-to-formatbytes    14d9833  Rename fmtBytes to formatBytes
-  feat-2-retry-failed-fetches-with-backof  c45e573  Retry failed fetches with backoff
+  feat-2-retry-failed-fetches-with        c45e573  Retry failed fetches with backoff
   feat                                     e7b10b9  Fix off-by-one in parseHeader   (top)
 To open the PRs without gh stack (nothing was pushed):
-  git push -u <remote> feat-1-rename-fmtbytes-to-formatbytes feat-2-retry-failed-fetches-with-backof feat
+  git push -u <remote> feat-1-rename-fmtbytes-to-formatbytes feat-2-retry-failed-fetches-with feat
   gh pr create --base main --head feat-1-rename-fmtbytes-to-formatbytes --fill
   ...
 ```
@@ -217,10 +234,10 @@ them) uncommitted, commits the rest, and quotes the error:
 #   src/net.ts(22,38): error TS2552: Cannot find name 'failur'. Did you mean 'failure'?
 ```
 
-**Your project already has type errors at HEAD?** Many do. By default carve refuses, because it
-cannot promise that commits pass a check HEAD itself fails, and it tells you how many errors
-HEAD has. `git carve --no-new-errors` carves anyway, promising instead that no commit adds an
-error HEAD didn't already have. The buffer and the summary say so in those words.
+**Your project already has type errors at HEAD?** Many do. carve carves anyway, promising that
+no commit adds an error HEAD didn't already have, and the buffer and the summary say so in those
+words. `--strict` (or `git config carve.noNewErrors false`) refuses instead. A check whose
+output carve can't compare error by error (no `path(line,col): error` lines) stays strict.
 
 ## Gate every push
 
@@ -267,12 +284,12 @@ command first checks that `git-carve` is installed, so a teammate without it is 
 carve's own hook never crashes into a block: on its own errors it lets the command run and
 says so.
 
-Agents never write your commit messages. An agent can prepare a re-split from `git carve @{u}
---plan-only --json` (its `buffer` field), with its suggestions as `# proposed:` comments. You
-open that with `git carve @{u} --plan-file <file> --edit` and write the messages yourself.
-A plan file with messages already in it is refused, unless you opt in for the repository:
-`git config carve.agentMessages true`.
-`agent/skills/git-carve/SKILL.md` teaches an agent this recipe.
+An agent can re-split by itself. It takes the `buffer` from `git carve @{u} --plan-only
+--json`, writes a message under each `commit`, and runs `git carve @{u} --plan-file <file>`
+(add `--stack` for PRs). carve checks every commit before anything moves, and records that the
+messages came from a file. Projects that require human-written messages set
+`git config carve.requireHumanMessages true`: the agent then writes `# proposed:` comments and
+you run the same command with `--edit`. `agent/skills/git-carve/SKILL.md` teaches an agent both.
 
 In CI (GitHub Actions), with the npm package:
 
@@ -283,20 +300,19 @@ In CI (GitHub Actions), with the npm package:
 - run: npx git-carve verify origin/${{ github.base_ref }}..HEAD
 ```
 
-Add `--no-new-errors` if the branch's base already fails the check. Each commit then fails only
-for errors the base did not have. `git config carve.noNewErrors true` does the same for the hook.
+If the branch's base already fails the check, each commit fails only for errors the base did not
+have. Add `--strict` to count those too, or `git config carve.noNewErrors false` for the hook.
 
 ## Not just TypeScript
 
-| Language | How carve reads it | Default check |
-|---|---|---|
-| TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`) | full parser: names resolved through imports | `tsc --noEmit` on the projects that own your changes |
-| JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`) | the same parser (ES modules; CommonJS `require` not yet) | in a TypeScript project, `tsc` proves JS files only under `allowJs`/`checkJs`; the others are reported unverified. A JS-only project: pass `--check "npm test"` |
-| Rust | definitions by keyword, function extents, names matched across changed files | `cargo check --all-targets` |
-| Go | as above | `go build ./... && go vet ./...` |
-| Python | as above | `python3 -m compileall` (syntax only) |
-| Java, Kotlin, C, C++, C#, Ruby, PHP, Swift, Scala, Elixir, Lua, Dart | as above | none: pass `--check` or set `git config carve.check` |
-| everything else | grouped by file and name | none |
+- **TypeScript and JavaScript** get a full parser: names are resolved through imports. The
+  default check is `tsc --noEmit` on the projects that own your changes. tsc checks JavaScript
+  only under `allowJs`/`checkJs`, and other JS files are reported unverified. A JavaScript-only
+  project passes its own check, such as `--check "npm test"`.
+- **Rust, Go and Python** are read by keywords and indentation, with default checks
+  `cargo check`, `go build && go vet` and `python3 -m compileall` (syntax only).
+- **Anything else** is grouped by file and name. Pass the check that fits:
+  `git carve --check "make test"`.
 
 The same mess in Python (a new function, its caller, and its test; a drive-by fix; a stray
 `breakpoint()`) comes out the same way:
@@ -378,13 +394,14 @@ and `cargo install git-carve`. Because the binary is called `git-carve`, git fin
 | `git carve` | Plan, check, open your editor once, commit |
 | `git carve <base>` | Re-carve everything since `<base>` (commits and uncommitted changes), for example `git carve @{u}` |
 | `git carve <base> --rewrite-pushed` | Also re-carve commits already on a remote (you will force-push) |
-| `git carve <base> --stack` | Also make one branch per commit: a stack of PRs, each layer already checked; prints the commands to submit it |
+| `git carve <base> --stack` | Also make one branch per commit: a stack of PRs, each layer already checked, at most 5 (`--layers N`; 0 for no limit); prints the commands to submit it |
 | `git carve <base> --stack --submit` | Submit the stack with `gh stack` (pushes the layers, opens draft PRs) |
 | `git carve --plan-only` | Print the checked plan; commit nothing |
-| `git carve --plan-file plan.txt --edit` | Start the editor from a prepared plan (an agent's `# proposed:` lines, say) and write the messages |
+| `git carve --plan-file plan.txt` | Commit a prepared plan, messages included (an agent's, say); every commit is still checked |
+| `git carve --plan-file plan.txt --edit` | Open the editor on a prepared plan first, to review it and write the messages |
 | `git carve --check '<cmd>'` | Use your own check (default: the language's, above) |
 | `git carve --no-check` | Skip checking; the summary says the commits are unverified |
-| `git carve --no-new-errors` | When HEAD already fails the check: no commit may add a new error |
+| `git carve --strict` | Refuse when HEAD already fails the check (by default, no commit may add a new error) |
 | `git carve --undo` | Restore the state before the last run |
 | `git carve --json` | The plan and its evidence as JSON |
 | `git carve --clean` | Remove the scratch worktree and caches |
@@ -396,9 +413,9 @@ and `cargo install git-carve`. Because the binary is called `git-carve`, git fin
 
 ## FAQ
 
-**Why won't it write my commit messages?** A message records why a change was made, and only
-its author knows that. A generated message describes the diff, which the diff already does.
-carve does the mechanical part (grouping, ordering, checking) and leaves the words to you.
+**Does it write commit messages?** No. A message records why a change was made, and only its
+author knows that: you, or the agent that wrote the code. carve does the mechanical part
+(grouping, ordering, checking) and takes the words from you or your agent's plan file.
 
 **What does "passes" mean?** By default, it type-checks (TypeScript, Rust, Go) or parses
 (Python). It does not mean "works". To make every commit bisectable for a specific bug, use the
@@ -408,8 +425,9 @@ test that reproduces it as the check: `git carve --check 'npx vitest run src/par
 cargo's target directory), and results are cached by tree, so re-runs and regroupings reuse
 earlier work. The demo above runs the check 6 times in 5 seconds, most of it `tsc`.
 
-**Can I use it on my coding agent's output?** That is one of the main uses. Let the agent
-finish, run `git carve`, review the plan, and write the messages yourself.
+**Can I use it on my coding agent's output?** That is the main use. Let the agent finish, then
+run `git carve main --stack` and write the messages, or let the agent fill the plan itself
+(`--plan-file`).
 
 ## Limits
 

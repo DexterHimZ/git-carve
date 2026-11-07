@@ -2094,7 +2094,7 @@ refusing them, when they still form the branch's stack.
 - journal recovery;
 - leased pushes, with `--submit` exiting 6.
 
-## D53. `--no-new-errors` as the default (PROPOSED; it amends non-negotiable 3)
+## D53. `--no-new-errors` as the default (BUILT 2026-10-30; amends non-negotiable 3)
 
 **Problem.** The grill's third-hardest hit: on tier-B windows carve refused 27 against 15 scored,
 because HEAD already fails `tsc`. That includes my own repository. A tool that refuses
@@ -2282,3 +2282,156 @@ The rest was sound:
 - D57 is inert with the flag unset, and its bookkeeping and determinism hold.
 - `diagnosed` defaults to false for old cache entries.
 - The ARI formula is correct.
+
+
+**D53, built (2026-10-30).** I approved the flip on 2026-10-30.
+- **The setting.** Tolerance is the default.
+  - `--strict` (run and verify) or `git config carve.noNewErrors false` restores refusal.
+  - `--no-new-errors` stays accepted, hidden.
+  - `branch::tolerance()` returns (on, by default).
+- **Must-change 2 is built.** When tolerance is only the default and the base fails
+  without errors carve can compare, `verify` stays strict instead of erroring. The carve run
+  already refused in that case, as strict does, with a hint that says why.
+- **Non-negotiable 3 now reads as proposed.**
+- **Tests:**
+  - the strict paths take `--strict`;
+  - default tolerance, and the config switching it off;
+  - the unparsable-base fallback, which fails without the fallback.
+- `eval` keeps its explicit flags.
+
+## D58. Agent-filled messages by default; `carve.requireHumanMessages` opts back in (reverses D49's default)
+
+**Why.**
+- The grill's ranked hit 2: "refuses to write your commit messages" fights mass behavior.
+  Agents write messages by default, at least 14–15M public commits a month carry the Claude
+  Code trailer, and the kernel and Mesa relaxed their rules.
+- When an agent wrote the code, the agent knows why.
+- The D49 contortions kept the slogan, not a user.
+- Without it, both the stack and the engine shapes fail.
+
+**Decision (non-negotiable 1, amended):**
+- carve still generates no text.
+- `--plan-file` takes filled messages by default, and `plan_source` (in `undo.json` and the run
+  JSON) plus the reflog suffix record that.
+- `git config carve.requireHumanMessages true` brings D49 back for a repository: filled
+  messages are refused without `--edit`, and become `# proposed:` comments with it.
+- `carve.agentMessages` is gone.
+- The gate's deny text and `SKILL.md` teach the unattended flow: `--plan-only --json`, fill
+  `buffer`, then `--plan-file`, with `--stack` for PRs.
+
+**Tests:**
+- `an_agent_fills_the_plan_and_carve_builds_the_stack_without_an_editor` (stack.rs);
+- `require_human_messages_refuses_filled_plan_files_without_the_editor` (plan.rs);
+- the gate's deny text.
+
+## D59. `--layers N`: a stack has at most N layers (default 5)
+
+**Why.** In the agent-PR study, some plans had 15–19 groups. A stack wants 3–5 reviewable
+layers.
+
+**Decision.** With `--stack`, after verification, merge the adjacent pair with the fewest
+changed lines (the earlier pair on a tie) until at most N remain.
+- **The default is 5.** `--layers 0` means no limit, and `--layers` requires `--stack`.
+- **No re-check is needed.** Merging two neighbors only removes a boundary, so every remaining
+  prefix is the same tree as before.
+- The buffer says what merged, and the summary's failure count excludes it.
+
+**Validation:** the study's three most over-split agent PRs, re-planned with the new binary and
+applied through `--plan-file` with filled messages (D58):
+- 19, 15 and 8 groups each became 5 layers;
+- `verify` passed every layer.
+
+**Test:** `layers_caps_the_stack_by_merging_the_smallest_neighbors`.
+
+## D60. The eval harness and the judge flag leave the user's binary; license MIT OR Apache-2.0
+
+- **The `eval` cargo feature (default off)** gates the `eval` subcommands and `--judge` /
+  `--no-judge`, along with the eval submodules except `sha256` (the judge's weight hash).
+  - The release workflow builds without it.
+  - CI runs clippy for both feature sets and the full suite with `--features eval`.
+  - `tests/eval.rs` and `tests/judge.rs` require the feature.
+- **The judge's library code stays,** for the eval build.
+- **The tryout script drops its judge scene.**
+- **License: MIT OR Apache-2.0,** the Rust convention, in the npm packages too. The texts are
+  copied from the canonical files in the local cargo registry. `publish = false` stays until
+  my go-ahead at publication, which needs their tokens.
+
+## D61. F8: a barrel line goes with the new module it names (2026-10-30)
+
+**Found by dogfooding.**
+- An agent built a `timing` middleware on a hono branch, and a second agent carved it with
+  `--stack`, following only `SKILL.md`.
+- carve proposed 5 layers. Each one-line `export * from './middleware/timing'`, in `src/` and
+  in `deno_dist/`, became a PR of its own, and the agent merged them by hand.
+- **Why:** a barrel line binds no name, so the import-only post-pass found no user and no
+  nearest group in its file (barrel files change only that line), and left it alone.
+
+**Decision.**
+- **What the parser records.** The TypeScript adapter records the module specifiers of
+  re-exports and side-effect imports (`FileFacts.module_refs`).
+- **What gets linked.** facts.rs resolves them. An atom that adds such a line, naming a file
+  the change set adds, gets `adds_module`.
+- **Graph:**
+  - a soft edge F8 when the atom is normal code;
+  - for import-only atoms, the post-pass sends them to the module's group, after name users
+    and before the nearest group in the file.
+- **Not covered:** a `package.json` `exports` map pointing at the new build path stays on its
+  own. A JSON string match was judged too heuristic.
+- **Ablation:** `GIT_CARVE_DEV_DISABLE_EDGES=F8`. The judge's features ignore F8 (mask 0).
+
+**Measured (dev corpus and tune only; never test):**
+
+| Corpus | Windows changed | Better | Worse | Groups after |
+|---|---|---|---|---|
+| `train-manifest-v2` (389 windows) | 4 | 4 | 0 | 16→14, 19→16, 11→10, 4→3 |
+| tune | 1 | 1 | 0 | 7→6 (BCubed 0.837→0.852) |
+
+The aggregate E1 is unchanged at three decimals: the rule is narrow.
+
+**Dogfood:** the hono branch now plans 3 layers:
+1. the middleware with its tests, its `deno_dist` copy and both barrel lines;
+2. the unrelated typo fix;
+3. the `package.json` exports map.
+
+That is close to the agent's own hand-made split.
+
+**Test:** `a_barrel_line_goes_with_the_new_module_it_reexports` (tests/languages.rs). It covers
+`export *` and `import './x'`, and fails with F8 disabled.
+
+**Also from the dogfood:**
+- **Stack branch names** are cut at a word boundary: `feat-2-retry-failed-fetches-with`, not
+  `…-with-backof`.
+- **SKILL.md now says:**
+  - create the carve directory;
+  - pass `--stack` to both steps;
+  - how to write a message body;
+  - how to merge or move blocks.
+
+**Result review of D53, D58–D61 (2026-10-30).** The review confirmed the tolerance precedence,
+F8's determinism and ordering, the slug edge cases, and the feature gating. It reproduced 3
+must-fix findings; all are fixed, each with a test that fails without the fix:
+1. **The D58/D49 guard could be bypassed.**
+   - **Cause:** `messages_as_proposals` stopped at the first `@` line, compared `commit` exactly,
+     and kept `\r`, while the parser accepts messages after atoms, a trimmed `commit`, and CRLF.
+     With `requireHumanMessages`, a plan file with its messages below the atoms, run with
+     `--edit` and `GIT_EDITOR=true`, committed the agent's text.
+   - **Fix:** it now lexes exactly like `blocks()`.
+   - **Tests:** a unit test for messages after atoms and CRLF; in plan.rs, the end-to-end case
+     commits nothing.
+2. **The stack summary said "each passed" under default tolerance**, against non-negotiable 3.
+   - **Fix:** it now says "each adds no error beyond the base's N".
+   - **Test:** `a_stack_over_a_failing_base_says_no_new_error_not_passed`.
+3. **The default `--layers 5` squeezed an existing bigger stack.**
+   - **Example:** re-carving a 7-layer stack planned 5. The note claimed every adopted layer
+     moved, and two PRs were left on old commits.
+   - **Fix:** adoption is now known before planning.
+     - A default cap rises to keep the adopted layers.
+     - An explicit `--layers` is honored, and the buffer names the layers that stay behind.
+     - `--plan-only` plans the same way.
+   - **Test:** `recarving_a_bigger_stack_keeps_its_layers_under_the_default_cap`.
+
+**Also fixed:** CI now runs the suite with the shipped feature set too, not only with
+`--features eval`.
+
+**Noted, not fixed:** a timed-out HEAD check under tolerance gets the "no path(line,col) lines"
+hint.

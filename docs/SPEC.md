@@ -45,6 +45,11 @@ distrust.
 > carve-cli stacks PRs. Agent skills *ask* a model to keep commits buildable.
 > **git carve splits your uncommitted work and proves every commit passes your check,
 > in seconds, and never writes the message.**
+>
+> *Repositioned 2026-10-30 (DECISIONS.md D58–D60, after the product critique): git carve turns
+> a branch, yours or your agent's, into a stack of PRs that each pass your check before you
+> push; deterministic, undoable, and callable by your agent. carve still generates no message
+> text; the messages come from the plan (the editor, or a filled `--plan-file`).*
 
 Before publishing, re-verify every competitor claim in this section. They came from
 planning research and were not all independently confirmed (see §3.4).
@@ -383,6 +388,11 @@ That is exactly the right result.
   (a modification of at most 3 lines on each side that defines nothing and is the only change
   in its function), which never joins by file alone. Atoms whose group membership rests on F7
   alone are tagged `[same file]` in the buffer. The judge's features ignore F7.
+- **F8** New module (DECISIONS.md D61): a re-export (`export * from './x'`,
+  `export { a } from './x'`) or side-effect import (`import './x'`) that names a file the change
+  adds goes with that file. The line cannot exist before the module, and it binds no name for
+  F0 to follow. An import-only atom with such a line joins the module's group in the import
+  post-pass (after name users, before the nearest group in its file).
 
 F2 merges in code-only mode. D11 had stopped that; D11's own re-validation rule reversed it
 at M5 (D26). F2 pairs are the judge's first veto candidates (§7.3).
@@ -639,11 +649,12 @@ came from real repositories and current project templates (checked 2026-09-23):
 
 ### 8.3 Order of runs
 
-0. **Base first** (DECISIONS.md D43): HEAD's tree. If it fails and `--no-new-errors` is on
-   and the output's compiler errors are recognizable (`path(l,c): error TS…`), those errors
-   become the baseline: from then on a tree passes when it adds no error beyond them (matched
-   as a multiset of file, code, and message). Otherwise exit 3, counting HEAD's errors and
-   offering `--no-new-errors`.
+0. **Base first** (DECISIONS.md D43, D53): HEAD's tree. If it fails and tolerance is on (the
+   default; off with `--strict` or `carve.noNewErrors false`) and the output's compiler errors
+   are recognizable (`path(l,c): error TS…`), those errors become the baseline: from then on a
+   tree passes when it adds no error beyond them (matched as a multiset of file, code, and
+   message). Otherwise exit 3, counting HEAD's errors (with `--strict`, saying that dropping it
+   would tolerate them; with unrecognizable errors, saying carve cannot tell old from new).
 1. **Final**: HEAD plus all non-leave atoms. If it fails and the worktree-equivalent tree
    (all atoms) passes, un-leave the leftovers and continue (§6.5). If both fail, D40: leave the groups the check's error locations implicate
    (a few rounds), else search for one group to leave, and commit the rest; exit 3 only if
@@ -707,7 +718,10 @@ buffer lives at `<git-path carve>/PLAN`. It opens **once** for all messages. The
 one editor per commit.
 
 With `--plan-file <path>`, carve reads an already-filled buffer from that file instead of
-opening the editor, and a validation error exits 1 instead of reopening (DECISIONS.md D6).
+opening the editor, and a validation error exits 1 instead of reopening (DECISIONS.md D6). Its
+message lines become the commit messages: whoever filled the file (a human or an agent) wrote
+them, and the run records that (D58). Under `carve.requireHumanMessages`, filled messages are
+refused without `--edit`.
 
 ### 9.2 Format
 
@@ -914,7 +928,7 @@ The reflog keeps everything regardless.
 ## 11. CLI
 
 ```
-git carve [<base>] [--rewrite-pushed] [--check <cmd> | --no-check] [--no-new-errors] [--no-judge | --judge] [--plan-only | --plan-file <path>] [--json] [-v]
+git carve [<base>] [--rewrite-pushed] [--stack [--layers N] [--submit]] [--check <cmd> | --no-check] [--strict] [--plan-only | --plan-file <path> [--edit]] [--json] [-v]
 git carve --undo
 git carve --clean
 git carve eval build [--sources eval/sources.json] [--out <manifest>] [--train]   (hidden dev subcommands,
@@ -927,15 +941,16 @@ git carve eval run [--corpus <manifest>] [--arm code|judge] [--split tune|test] 
 | `<base>` | Re-carve everything since this commit: `base..HEAD` plus uncommitted changes (§5.6, DECISIONS.md D47). For example `main`, `HEAD~3`, `@{u}` |
 | `--rewrite-pushed` | Allow a range carve over commits already on a remote (a force-push will be needed) |
 | `--stack` | With `<base>`: one branch per new commit but the last (§10.2.1), and the commands that submit them as stacked PRs |
+| `--layers N` | With `--stack`: at most N layers (default 5; 0 for no limit). After verification, the adjacent pair with the fewest changed lines merges until the stack fits; each merge only removes a boundary, so every layer still passes (D59) |
 | `--submit` | With `--stack`: run `gh stack init` and `gh stack submit --auto` after committing; exit 6 if submitting fails |
 | `--check <cmd>` | Check command (overrides config and default) |
 | `--no-check` | Skip verification; summary says "unverified" |
-| `verify [RANGE] [--pre-push] [--fail-fast] [--no-new-errors] [--check CMD] [--json]` | Check every commit of a range (default `@{upstream}..HEAD`, else commits on no remote), oldest first, in the scratch worktree; exit 3 if any fails (DECISIONS.md D44). `--fail-fast` (implied by `--pre-push`, D51) stops at the first failing commit and reports how many were not checked; the D1 probe then runs only when every commit passed. `--json` carries `version: 1`; fields are only added within a version |
-| `--no-new-errors` | When HEAD already fails the check, commit only what adds no new error to HEAD's (DECISIONS.md D43); the buffer and summary say so |
-| `--no-judge` / `--judge` | Force code-only or judge mode (default: `carve.judge`, which defaults to `none`) |
+| `verify [RANGE] [--pre-push] [--fail-fast] [--strict] [--check CMD] [--json]` | Check every commit of a range (default `@{upstream}..HEAD`, else commits on no remote), oldest first, in the scratch worktree; exit 3 if any fails (DECISIONS.md D44). `--fail-fast` (implied by `--pre-push`, D51) stops at the first failing commit and reports how many were not checked; the D1 probe then runs only when every commit passed. `--json` carries `version: 1`; fields are only added within a version |
+| `--strict` | Refuse (run) or count (verify) errors the base already has. By default carve tolerates them: a commit only must add no new error, and the buffer and summary say so (D43, D53). `--no-new-errors` is still accepted (hidden), and means the default |
+| `--no-judge` / `--judge` | Only in `eval`-feature builds (D60): force code-only or judge mode |
 | `--plan-only` | Compute and verify, print the plan to stdout, commit nothing |
-| `--plan-file <path>` | Read a filled plan buffer from a file instead of opening the editor (§9.1). Its message lines must be empty unless `carve.agentMessages` is true (DECISIONS.md D49); the run records `plan_source` in `undo.json`, the reflog entry ends in `(plan file)`, and the summary says the messages came from the file |
-| `--edit` | With `--plan-file`: open the editor on the plan file, so the human reviews it and writes the messages (D49) |
+| `--plan-file <path>` | Read a filled plan buffer from a file instead of opening the editor (§9.1). Its message lines become the messages (D58); the run records `plan_source` in `undo.json` and the run JSON, the reflog entry ends in `(plan file)`, and the summary says the messages came from the file. Under `carve.requireHumanMessages`, filled messages are refused without `--edit` |
+| `--edit` | With `--plan-file`: open the editor on the plan file, so the human reviews it and writes the messages. Under `carve.requireHumanMessages`, the file's messages open as `# proposed:` comments (D49) |
 | `hooks install` / `hooks uninstall` | Write or remove `.git/hooks/pre-push` running `git-carve verify --pre-push`; never over a foreign hook or into a `core.hooksPath` (D50) |
 | `hooks print claude\|cursor\|codex\|git` | Print the hook setup to merge by hand; carve never writes agent config files (D50) |
 | `hooks run claude\|cursor\|codex` | Run as an agent's pre-tool hook: deny a `git push` whose commits fail the check (fail-fast), and any push that skips the pre-push hook; allow on any carve error (D50) |
@@ -946,8 +961,9 @@ git carve eval run [--corpus <manifest>] [--arm code|judge] [--split tune|test] 
 
 Config keys: `carve.check`, `carve.link` (multi-valued), `carve.judge` (`none|laya`),
 `carve.judgeTimeout`, `carve.checkTimeout`, `carve.maxAtoms`, `carve.checkJobs` (parallel
-check workers, §8.2), `carve.agentMessages` (bool; a plan file may carry messages, D49), `carve.noNewErrors`
-(bool; `verify`, the pre-push hook and the agent gate act as with `--no-new-errors`, D50).
+check workers, §8.2), `carve.requireHumanMessages` (bool; plan-file messages only through the
+editor, D58), `carve.noNewErrors` (bool; default true since D53; `false` makes carve, `verify`,
+the pre-push hook and the agent gate strict).
 
 | Exit code | Meaning |
 |---|---|

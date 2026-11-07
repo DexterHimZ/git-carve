@@ -6,13 +6,24 @@ and the dated history lives in `WORKLOG.md`.
 
 ## In progress
 
-Phases 3–4 were built on 2026-10-14 (D50, D51). Next pick: stack iteration (item 3). Before
-that: D46 phases 3–4, the agent gate pack and the speed gate (planned items 1–2,
-design in `docs/design/agent-gate-speed.md`). Phase 1 (`git carve <base>`, D47) and phase 2
-(`--stack`, D48) shipped on 2026-10-13. The result review of phase 2 (2026-10-14) found
-5 issues; all are fixed with tests. It also reordered phases 3–4: fail-fast `verify
---pre-push` comes first. D46 (2026-10-13) set the order below from researched developer
-demand and the October 2026 competitive map.
+**Direction (2026-10-30, D58–D60):** *turn a branch, yours or your agent's,
+into a stack of PRs that each pass your check before you push; deterministic, undoable,
+callable by your agent.* It comes from a product critique, a pre-registered study of 40 public
+agent PRs, and a carve-vs-agent pilot.
+- **For it:** agents' PRs hold material for passing stacks (72% have ≥ 2 layers).
+- **Against the old pitch:** agents pushed no red intermediate commits (0 of 14).
+- **Open:** a strong agent grouped better in the pilot.
+
+**The path to v0.1.0, in order:**
+1. [x] D53: tolerance of HEAD's errors is the default (`--strict` refuses).
+2. [x] D58: agent-filled plan files are the default (`carve.requireHumanMessages` opts out).
+3. [x] D59: `--layers` (default 5).
+4. [x] D60: eval and judge out of the user binary; MIT OR Apache-2.0.
+5. [x] The README leads with stacks.
+6. [ ] Publish: npm and crates.io, after my go-ahead and tokens (D39).
+7. [ ] Outside users: 10 people who run agents on TypeScript; go/kill on 2026-11-12, against
+   the critique's criteria.
+8. [ ] Error-guided repair (D57) to its pass rule: a tier-B dev corpus, plus tier (b).
 
 ## Planned (in order)
 
