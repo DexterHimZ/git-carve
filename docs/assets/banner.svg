@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
+  <title id="title">git carve</title>
+  <desc id="desc">Your agent writes the code. git carve makes it reviewable: it splits the diff into small stacked PRs, and not one of them breaks the build.</desc>
+  <defs>
+    <radialGradient id="glow" cx="72%" cy="50%" r="55%">
+      <stop offset="0" stop-color="#3fb950" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#3fb950" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace; }
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, "Liberation Sans", "DejaVu Sans", Ubuntu, sans-serif; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1279" height="399" rx="16" fill="#0d1117" stroke="#30363d"/>
+  <rect x="0" y="0" width="1280" height="400" rx="16" fill="url(#glow)"/>
+
+  <!-- Mark: a change carved into a stack of layers, each one offset like a stacked PR -->
+  <g transform="translate(72 76)">
+    <rect x="0" y="0" width="48" height="16" rx="4" fill="#3fb950" fill-opacity="0.30" stroke="#3fb950"/>
+    <rect x="10" y="21" width="48" height="16" rx="4" fill="#3fb950" fill-opacity="0.55" stroke="#3fb950"/>
+    <rect x="20" y="42" width="48" height="16" rx="4" fill="#3fb950" fill-opacity="0.85" stroke="#3fb950"/>
+  </g>
+
+  <!-- Wordmark and tagline -->
+  <text class="mono" x="68" y="196" font-size="64" font-weight="700" fill="#e6edf3"><tspan fill="#8b949e">git</tspan> carve</text>
+  <text class="sans" x="72" y="246" font-size="30" font-weight="600" fill="#e6edf3">Your agent writes the code.</text>
+  <text class="sans" x="72" y="284" font-size="30" font-weight="600" fill="#e6edf3">git carve makes it <tspan fill="#3fb950">reviewable.</tspan></text>
+  <text class="sans" x="72" y="324" font-size="19" fill="#8b949e">Splits the diff into small stacked PRs,</text>
+  <text class="sans" x="72" y="350" font-size="19" fill="#8b949e">and not one of them breaks the build.</text>
+
+  <!-- Terminal -->
+  <g transform="translate(656 64)">
+    <rect x="0.5" y="0.5" width="559" height="271" rx="12" fill="#161b22" stroke="#30363d"/>
+    <circle cx="22" cy="22" r="6" fill="#484f58"/>
+    <circle cx="42" cy="22" r="6" fill="#484f58"/>
+    <circle cx="62" cy="22" r="6" fill="#484f58"/>
+    <line x1="0.5" y1="44" x2="559.5" y2="44" stroke="#30363d"/>
+
+    <text class="mono" x="26" y="88" font-size="20" fill="#e6edf3"><tspan fill="#8b949e">$ </tspan>git carve main --stack</text>
+
+    <g class="mono" font-size="19">
+      <circle cx="35" cy="125" r="10" fill="#238636"/>
+      <path d="M30 125.5 l3.5 3.5 l6.5 -7" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="56" y="132" fill="#79c0ff">feat-1</text>
+      <text x="140" y="132" fill="#c9d1d9">Rename fmtBytes to formatBytes</text>
+
+      <circle cx="35" cy="163" r="10" fill="#238636"/>
+      <path d="M30 163.5 l3.5 3.5 l6.5 -7" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="56" y="170" fill="#79c0ff">feat-2</text>
+      <text x="140" y="170" fill="#c9d1d9">Retry failed fetches with backoff</text>
+
+      <circle cx="35" cy="201" r="10" fill="#238636"/>
+      <path d="M30 201.5 l3.5 3.5 l6.5 -7" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="56" y="208" fill="#79c0ff">feat</text>
+      <text x="140" y="208" fill="#c9d1d9">Fix off-by-one in parseHeader</text>
+    </g>
+
+    <text class="mono" x="26" y="250" font-size="17" fill="#8b949e">each layer passed <tspan fill="#3fb950">tsc --noEmit</tspan> before commit</text>
+  </g>
+</svg>

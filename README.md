@@ -1,10 +1,7 @@
-<!-- DRAFT (M7). Not published. Before publishing: record the demo (docs/demo.tape) and re-verify
-§3.4 of docs/SPEC.md. -->
-
-# git carve
-
-**Turns a branch, yours or your agent's, into a stack of PRs that each pass your check before
-you push. Deterministic, undoable, and callable by your agent.**
+<p align="center">
+  <img src="docs/assets/banner.svg" width="100%"
+       alt="git carve: turn a branch, yours or your agent's, into a stack of PRs that each pass your check before you push">
+</p>
 
 Your agent just finished: one branch, a few hundred lines across a dozen files, one or two
 commits named `wip`. Reviewers want small PRs, and GitHub now stacks them, but splitting by hand
